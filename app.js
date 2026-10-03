@@ -308,8 +308,12 @@ function normalizeSprite(raw) {
   const { costume: legacyEmoji, costumes, costumeIndex, sounds, effects, scripts, ...rest } =
     raw && typeof raw === 'object' ? raw : {};
   const s = Object.assign(makeSprite('Sprite', '🐱'), rest);
-  const legacy = Array.isArray(costumes) ? [] : [typeof legacyEmoji === 'string' ? legacyEmoji : '', ...legacyCostumeTexts(scripts)];
+  const migrated = !Array.isArray(costumes);
+  const legacy = migrated ? [typeof legacyEmoji === 'string' ? legacyEmoji : '', ...legacyCostumeTexts(scripts)] : [];
   s.costumes = sanitizeCostumes(costumes, legacy);
+  // Before costume lists, any text could be a costume; such sprites keep working that way.
+  if (migrated || (raw && raw.freeTextCostumes === true)) s.freeTextCostumes = true;
+  else delete s.freeTextCostumes;
   s.costumeIndex = clamp(Math.round(num(costumeIndex)), 0, s.costumes.length - 1);
   preloadCostumes(s);
   s.sounds = sanitizeSounds(sounds);
@@ -369,13 +373,14 @@ function save() {
       localStorage.setItem(STORAGE_KEY, serialize());
       if (saveFailed) setSaveFailed(false);
     } catch (err) {
-      if (err && (err.name === 'QuotaExceededError' || err.code === 22)) setSaveFailed(true);
+      if (isQuotaError(err) && !saveFailed) setSaveFailed(true);
     }
   }, 250);
 }
 // Pictures and sounds can make a project bigger than the browser will store. While that's
 // the case a banner stays up (the browser's copy is out of date), and leaving the page asks first.
 let saveFailed = false;
+const isQuotaError = err => !!err && (err.name === 'QuotaExceededError' || err.code === 22);
 function setSaveFailed(failed) {
   saveFailed = failed;
   let bar = document.getElementById('save-warning');
@@ -387,7 +392,11 @@ function setSaveFailed(failed) {
     const btn = el('button', null, 'Save to computer');
     btn.type = 'button';
     btn.addEventListener('click', () => $('#btn-save').click());
-    bar.append(el('span', null, "This project is too big to keep in the browser, so your latest changes aren't saved here. "), btn);
+    const close = el('button', 'close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Hide this message');
+    close.addEventListener('click', () => { bar.hidden = true; });
+    bar.append(el('span', null, "This project is too big to keep in the browser, so your latest changes aren't saved here. "), btn, close);
     document.body.appendChild(bar);
   }
   bar.hidden = false;
@@ -793,6 +802,9 @@ let hoverEl = null;
 function inRect(x, y, r) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
 
 document.addEventListener('pointerdown', e => {
+  const ae = document.activeElement;
+  if (ae && ae !== document.body && ae.closest && ae.closest('#tabs, .media-panel') &&
+      !(e.target.closest && e.target.closest('#tabs, .media-panel'))) ae.blur();
   hideContextMenu();
   clearReport();
   audioUnlock();
@@ -1147,26 +1159,29 @@ let uiDirty = true;
 // ---- Where a sprite really is, for clicks, edges and speech bubbles. A painted costume can
 // sit anywhere around the sprite's position (its centre is the + in the paint editor).
 
-// The costume's box around the sprite's position, before turning (canvas units, y down).
-function costumeBox(s) {
-  const c = displayCostume(s);
-  const k = s.size / 100;
-  if (c.kind === 'image') return { l: -c.cx * k, r: (c.w - c.cx) * k, t: -c.cy * k, b: (c.h - c.cy) * k };
-  const r = s.size * 0.24;
-  return { l: -r, r, t: -r, b: r };
-}
 // How drawSprite turns the sprite: an angle (canvas radians) or a left-right flip.
 function spriteTurn(s) {
   if (s.rotationStyle === 'all around') return { a: rad(s.dir - 90), flip: false };
   return { a: 0, flip: s.rotationStyle === 'left-right' && s.dir < 0 };
 }
 // How far the turned sprite reaches from its position, in stage units: { left, right, bottom, top }.
+// Emoji count as circles; painted costumes use the outline (convex hull) of their pixels, so a
+// turned round picture reaches the edge exactly when its paint does.
 function spriteBounds(s) {
-  const box = costumeBox(s), { a, flip } = spriteTurn(s);
+  const c = displayCostume(s);
+  if (c.kind !== 'image') {
+    const r = s.size * 0.24;
+    return { left: -r, right: r, bottom: -r, top: r };
+  }
+  const k = s.size / 100;
+  const pts = costumeHull(c);
+  if (!pts.length) return { left: 0, right: 0, bottom: 0, top: 0 };
+  const { a, flip } = spriteTurn(s);
   const cos = Math.cos(a), sin = Math.sin(a);
   let left = Infinity, right = -Infinity, bottom = Infinity, top = -Infinity;
-  for (const [x0, y0] of [[box.l, box.t], [box.r, box.t], [box.l, box.b], [box.r, box.b]]) {
-    const x = flip ? -x0 : x0;
+  for (const [px, py] of pts) {
+    const y0 = (py - c.cy) * k;
+    const x = flip ? -(px - c.cx) * k : (px - c.cx) * k;
     const cx = x * cos - y0 * sin, cy = x * sin + y0 * cos;
     left = Math.min(left, cx);
     right = Math.max(right, cx);
@@ -1188,10 +1203,10 @@ function spriteContains(s, x, y) {
   if (c.kind !== 'image') return Math.hypot(lx, ly) <= s.size * 0.24;
   if (!k) return false;
   const px = lx / k + c.cx, py = ly / k + c.cy;
-  if (px < 0 || py < 0 || px >= c.w || py >= c.h) return false;
-  const alpha = costumeAlpha(c);
-  if (!alpha) return true; // still loading: the box will do
   const slack = Math.max(1, Math.ceil(2 / k)); // a little leeway so thin lines are easy to click
+  if (px < -slack || py < -slack || px >= c.w + slack || py >= c.h + slack) return false;
+  const alpha = costumeAlpha(c);
+  if (!alpha) return px >= 0 && py >= 0 && px < c.w && py < c.h; // still loading: the box will do
   const x0 = Math.floor(px), y0 = Math.floor(py);
   for (let yy = Math.max(0, y0 - slack); yy <= Math.min(c.h - 1, y0 + slack); yy++) {
     for (let xx = Math.max(0, x0 - slack); xx <= Math.min(c.w - 1, x0 + slack); xx++) {
@@ -1926,7 +1941,10 @@ function isTyping(e) {
 window.addEventListener('keydown', e => {
   // Keys pressed while a dialog is open belong to the dialog, not the stage.
   if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey || modalOpen()) return;
-  if (e.target.closest && e.target.closest('#tabs, .media-panel')) return; // keys belong to the editor there
+  if (e.defaultPrevented) return; // already used, e.g. Space choosing a costume in the list
+  // Space and arrows work the focused tab or costume/sound control instead of the stage.
+  const own = keyName(e);
+  if (e.target.closest && e.target.closest('#tabs, .media-panel') && (own === 'space' || (own && own.endsWith('arrow')))) return;
   const k = keyName(e);
   if (!k) return;
   if (k === 'space' || k.endsWith('arrow')) e.preventDefault();
@@ -2122,8 +2140,8 @@ fileInput.addEventListener('change', async () => {
 window.addEventListener('beforeunload', e => {
   try {
     localStorage.setItem(STORAGE_KEY, serialize());
-  } catch {
-    if (saveFailed) { e.preventDefault(); e.returnValue = ''; } // ask before losing unsaved work
+  } catch (err) {
+    if (saveFailed || isQuotaError(err)) { e.preventDefault(); e.returnValue = ''; } // ask before losing work
   }
 });
 

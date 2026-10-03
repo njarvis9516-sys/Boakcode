@@ -27,22 +27,24 @@ const noteLabel = midi => NOTE_NAMES[midi % 12] + (Math.floor(midi / 12) - 1);
 const IMAGE_DATA_RE = /^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/;
 const AUDIO_DATA_RE = /^data:(audio|video)\/[\w.+-]+(;[\w.+-]+=[\w.+-]+)*;base64,[A-Za-z0-9+/=]+$/;
 const PICTOGRAPHIC_RE = /\p{Extended_Pictographic}/u;
-const validBase64 = dataURL => (dataURL.length - dataURL.indexOf(',') - 1) % 4 === 0;
+const validBase64 = dataURL => (dataURL.length - dataURL.indexOf(',') - 1) % 4 !== 1;
 
 // Values cached on costumes/sounds (decoded images and audio) must never be saved.
 function setHidden(obj, key, value) {
   Object.defineProperty(obj, key, { value, configurable: true, writable: true, enumerable: false });
 }
 
-const MAX_MEDIA_NAME = 40;
+const MAX_MEDIA_NAME = 40; // characters
+const cutName = (str, n) => Array.from(str).slice(0, Math.max(0, n)).join(''); // never splits an emoji
 function uniqueMediaName(names, base) {
-  base = String(base).trim().slice(0, MAX_MEDIA_NAME) || 'item';
+  base = cutName(String(base).trim(), MAX_MEDIA_NAME) || 'item';
   if (!names.includes(base)) return base;
   const m = /^(.*?)(\d+)$/.exec(base);
-  const stem = m ? m[1] : base;
-  let n = m ? Number(m[2]) + 1 : 2;
-  const make = k => stem.slice(0, MAX_MEDIA_NAME - String(k).length) + k;
-  while (names.includes(make(n))) n++;
+  const numbered = m && Number.isSafeInteger(Number(m[2]) + 1);
+  const stem = numbered ? m[1] : base;
+  let n = numbered ? Number(m[2]) + 1 : 2;
+  const make = k => cutName(stem, MAX_MEDIA_NAME - String(k).length) + k;
+  for (let tries = 0; tries < 100000 && names.includes(make(n)); tries++) n++;
   return make(n);
 }
 const fileBaseName = name => String(name || '').replace(/\.[^.]+$/, '').slice(0, 40).trim();
@@ -115,7 +117,7 @@ function legacyCostumeTexts(scripts) {
     if (!b || typeof b !== 'object' || !Array.isArray(b.inputs)) return;
     if (b.type === 'costume' && isPrimitive(b.inputs[0])) {
       const t = String(b.inputs[0]).trim();
-      if (t && !isNumeric(t) && [...t].length <= 12 && !found.includes(t)) found.push(t);
+      if (t && [...t].length <= 32 && !found.includes(t)) found.push(t);
     }
     b.inputs.forEach(walkB);
     if (Array.isArray(b.bodies)) b.bodies.forEach(walkList);
@@ -180,16 +182,21 @@ function switchCostume(s, v) {
   const list = s.costumes;
   let i = list.findIndex(c => c.name === key);
   if (i < 0) i = list.findIndex(c => c.kind === 'emoji' && c.emoji === key);
-  if (i < 0 && isNumeric(key)) {
+  if (i < 0 && isNumeric(key) && !s.freeTextCostumes) {
     const n = Math.round(Number(key));
     if (!Number.isFinite(n)) return;
     i = (((n - 1) % list.length) + list.length) % list.length;
   }
   if (i >= 0) { setCostumeIndex(s, i); return; }
-  if (PICTOGRAPHIC_RE.test(key) && [...key].length <= 12 && s._emoji !== key) {
+  const showable = s.freeTextCostumes ? [...key].length <= 32 : PICTOGRAPHIC_RE.test(key) && [...key].length <= 12;
+  if (showable && s._emoji !== key) {
     setHidden(s, '_emoji', key);
     uiDirty = true;
   }
+}
+// The user is working on the sprite's real costume: stop showing a script's temporary emoji.
+function clearEmojiOverride(s) {
+  if (s._emoji) { s._emoji = null; uiDirty = true; }
 }
 function nextCostume(s) {
   setCostumeIndex(s, (s.costumeIndex + 1) % s.costumes.length);
@@ -232,6 +239,41 @@ function costumeImage(c) {
     setHidden(c, '_img', img);
   }
   return c._img.complete && c._img.naturalWidth ? c._img : null;
+}
+
+// Outline (convex hull) of a painted costume's pixels, in costume pixel coordinates.
+function costumeHull(c) {
+  if (c.kind !== 'image' || !c.w || !c.h) return [];
+  if (c._hullSrc === c.dataURL) return c._hull;
+  const alpha = costumeAlpha(c);
+  if (!alpha) return [[0, 0], [c.w, 0], [c.w, c.h], [0, c.h]]; // still loading: the box will do
+  const pts = [];
+  for (let y = 0; y < c.h; y++) {
+    let lo = -1, hi = -1;
+    for (let x = 0; x < c.w; x++) if (alpha[y * c.w + x] > 16) { if (lo < 0) lo = x; hi = x; }
+    if (lo >= 0) pts.push([lo, y], [lo, y + 1], [hi + 1, y], [hi + 1, y + 1]);
+  }
+  const hull = pts.length ? convexHull(pts) : [];
+  setHidden(c, '_hull', hull);
+  setHidden(c, '_hullSrc', c.dataURL);
+  return hull;
+}
+function convexHull(points) {
+  const p = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [], upper = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
 }
 
 // Alpha values of an image costume (for clicking exactly on the painted pixels).
@@ -319,6 +361,7 @@ async function costumeToCanvas(c, cv) {
     g.font = `48px ${EMOJI_FONT}`;
     // Long emoji text is shrunk so none of it is cut off at the canvas edges.
     const px = Math.max(4, Math.floor(48 * Math.min(1, (PAINT_W - 8) / Math.max(1, g.measureText(c.emoji).width))));
+    if (px < 48) toast('This emoji text was wider than the paint canvas, so it was shrunk to fit.');
     g.font = `${px}px ${EMOJI_FONT}`;
     g.textAlign = 'center';
     g.textBaseline = 'middle';
@@ -530,7 +573,8 @@ const soundsPanel = document.getElementById('sounds-panel');
 let currentTab = 'code';
 let mediaPanelDirty = false;
 
-function setTab(tab) {
+function setTab(tab, force = false) {
+  if (tab === currentTab && !force) return; // e.g. Space on the focused active tab
   currentTab = tab;
   appEl.dataset.tab = tab;
   for (const b of document.querySelectorAll('#tabs [data-tab]')) {
@@ -552,7 +596,10 @@ function setTab(tab) {
 }
 
 for (const b of document.querySelectorAll('#tabs [data-tab]')) {
-  b.addEventListener('click', () => setTab(b.dataset.tab));
+  b.addEventListener('click', e => {
+    setTab(b.dataset.tab);
+    if (e.detail) b.blur(); // a mouse click shouldn't leave keys going to the tab
+  });
   b.addEventListener('keydown', e => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     const tabs = [...document.querySelectorAll('#tabs [data-tab]')];
@@ -611,16 +658,24 @@ function mediaItem(index, selected, thumb, title, subtitle, onSelect, onDelete) 
     del.type = 'button';
     del.title = 'Delete';
     del.setAttribute('aria-label', `Delete ${title}`);
-    del.addEventListener('click', e => { e.stopPropagation(); onDelete(); });
+    del.addEventListener('click', e => { e.stopPropagation(); onDelete(e.detail === 0); });
     item.appendChild(del);
   }
   return item;
 }
 
-// After a keyboard selection rebuilds a panel, put focus back on the selected item.
+// After a keyboard action rebuilds a panel, put focus back on the selected item.
 function refocusSelected(panel) {
-  const sel = panel.querySelector('.media-item.selected');
-  if (sel) sel.focus();
+  const target = panel.querySelector('.media-item.selected') || panel.querySelector('.media-add button');
+  if (target) target.focus();
+}
+function relabelItem(item, name) {
+  if (!item) return;
+  item.querySelector('.name').textContent = name;
+  const del = item.querySelector('.del');
+  if (del) del.setAttribute('aria-label', `Delete ${name}`);
+  const play = item.querySelector('.media-play');
+  if (play) play.setAttribute('aria-label', `Play ${name}`);
 }
 
 function nameField(label, value, onRename) {
@@ -660,18 +715,19 @@ function renderCostumesPanel() {
   s.costumes.forEach((c, i) => {
     list.appendChild(mediaItem(i, c === cur, costumeThumb(c, 'thumb'), c.name, c.kind === 'emoji' ? 'emoji' : `${c.w}×${c.h}`,
       byKeyboard => {
-        if (c === cur && !s._emoji) return; // already showing: keep the editor (and its undo history)
+        if (c === cur) { clearEmojiOverride(s); return; } // already open: keep the editor and its undo history
         setCostumeIndex(s, i);
         save();
         renderCostumesPanel();
         if (byKeyboard) refocusSelected(costumesPanel);
       },
-      s.costumes.length > 1 ? () => {
+      s.costumes.length > 1 ? byKeyboard => {
         if (!confirm(`Delete costume "${c.name}"?`)) return;
         s.costumes.splice(i, 1);
         setCostumeIndex(s, s.costumeIndex > i || s.costumeIndex === s.costumes.length ? s.costumeIndex - 1 : s.costumeIndex);
         mediaListChanged(s);
         renderCostumesPanel();
+        if (byKeyboard) refocusSelected(costumesPanel);
       } : null));
   });
   const adders = el('div', 'media-add');
@@ -714,8 +770,7 @@ function renderCostumesPanel() {
     renameMediaRefs(s, 'costume', cur.name, name);
     cur.name = name;
     mediaRenamed();
-    const label = list.querySelector('.media-item.selected .name');
-    if (label) label.textContent = name;
+    relabelItem(list.querySelector('.media-item.selected'), name);
     return name;
   }));
   head.appendChild(mediaButton('Duplicate', '', () => {
@@ -747,6 +802,7 @@ function renderEmojiEditor(editor, s, c) {
     if (!v) return;
     c.emoji = v;
     preview.textContent = v;
+    clearEmojiOverride(s);
     uiDirty = true;
     save();
     const thumb = costumesPanel.querySelector('.media-item.selected .thumb');
@@ -768,6 +824,7 @@ function renderEmojiEditor(editor, s, c) {
     for (const k of Object.keys(c)) delete c[k];
     Object.assign(c, { name, kind: 'image' });
     canvasToCostume(cv, c);
+    clearEmojiOverride(s);
     uiDirty = true;
     save();
     renderCostumesPanel();
@@ -894,6 +951,7 @@ function openPaintEditor(editor, sprite, costume) {
   }
   function saveCanvas() {
     canvasToCostume(bitmap, costume);
+    clearEmojiOverride(sprite);
     syncHistory();
     uiDirty = true;
     save();
@@ -961,7 +1019,8 @@ function openPaintEditor(editor, sprite, costume) {
     if (e.button !== 0 || !session.ready || session.drawing) return;
     e.preventDefault();
     // Clicking the canvas takes focus off the toolbar, so Ctrl+Z works straight after.
-    if (document.activeElement && editor.contains(document.activeElement)) document.activeElement.blur();
+    const ae = document.activeElement;
+    if (ae && ae !== document.body && ae.blur) ae.blur();
     const p = toPaint(e);
     const tool = paintPrefs.tool;
     if (tool === 'picker') {
@@ -1100,12 +1159,13 @@ function renderSoundsPanel() {
         renderSoundsPanel();
         if (byKeyboard) refocusSelected(soundsPanel);
       },
-      () => {
+      byKeyboard => {
         if (!confirm(`Delete sound "${x.name}"?`)) return;
         s.sounds.splice(i, 1);
         if (selectedSound === x) selectedSound = null;
         mediaListChanged(s);
         renderSoundsPanel();
+        if (byKeyboard) refocusSelected(soundsPanel);
       });
     const play = el('button', 'media-play', '▶');
     play.type = 'button';
@@ -1156,8 +1216,7 @@ function renderSoundsPanel() {
       renameMediaRefs(s, 'sound', cur.name, name);
       cur.name = name;
       mediaRenamed();
-      const label = list.querySelector('.media-item.selected .name');
-      if (label) label.textContent = name;
+      relabelItem(list.querySelector('.media-item.selected'), name);
       return name;
     }));
     if (cur.kind === 'made') {
@@ -1303,6 +1362,7 @@ function renderSoundMaker(editor, s, snd) {
   function renderGrid() {
     grid.innerHTML = '';
     grid.style.gridTemplateColumns = `44px repeat(${snd.length}, minmax(16px, 1fr))`;
+    grid.style.minWidth = `${44 + snd.length * 18 + 16}px`;
     SOUND_SCALE.forEach((midi, row) => {
       grid.appendChild(el('span', 'sm-label' + (midi % 12 === 0 ? ' sm-c' : ''), noteLabel(midi)));
       for (let st = 0; st < snd.length; st++) {

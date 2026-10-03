@@ -423,7 +423,9 @@ function walkAllBlocks(fn, extraExts = []) {
 // Placed blocks store their input values by position. When an extension is replaced by a
 // new version, move each value to its input's new position (matched by name), fill new
 // inputs with their defaults, and drop values that no longer fit the input's type.
-function remapExtensionInputs(oldExt, newExt) {
+// includeNew: also remap the new version's own block-coded bodies — only right for the editor,
+// whose draft was written against the old layout (an imported file already uses the new one).
+function remapExtensionInputs(oldExt, newExt, { includeNew = false } = {}) {
   const changes = {};
   for (const nb of newExt.blocks) {
     const ob = oldExt.blocks.find(b => b.opcode === nb.opcode);
@@ -439,12 +441,16 @@ function remapExtensionInputs(oldExt, newExt) {
     b.inputs = c.newArgs.map(a => {
       const oi = c.oldNames.indexOf(a.name);
       const v = oi >= 0 ? b.inputs[oi] : undefined;
-      if (v && typeof v === 'object') return v; // a reporter block stays where it was put
+      if (v && typeof v === 'object') {
+        // A reporter block stays where it was put, unless the input can no longer hold it.
+        const fits = a.type === 'menu' ? false : a.type === 'boolean' ? specOf(v.type).shape === 'boolean' : true;
+        return fits ? v : argSpec(a).d;
+      }
       const stale = v === undefined || a.type === 'boolean' ||
         (a.type === 'menu' && !menuOptions(a).includes(String(v)));
       return stale ? argSpec(a).d : v;
     });
-  }, [newExt]); // the new version's own blocks can use each other too
+  }, includeNew ? [newExt] : []);
 }
 
 function blockUseCount(ext) {
@@ -470,19 +476,21 @@ const extToBool = v => (v == null ? false : bool(toPrimitive(v)));
 
 function makeUtil(t) {
   const s = t.sprite;
+  // Once the block is stopped (Stop, Cancel, a new project…), anything it tries to do ends it.
+  const live = fn => (...a) => { if (t.stopped) throw STOP; return fn(...a); };
   return {
     wait: secs => waitSecs(t, num(secs)),
     frame: () => frame(t),
-    moveTo: (x, y) => moveTo(s, num(x), num(y)),
-    turn: d => setDir(s, s.dir + num(d)),
-    pointIn: d => setDir(s, num(d)),
-    say: text => { s._bubble = text == null || text === '' ? null : { text: fmt(toPrimitive(text)), kind: 'say' }; },
-    think: text => { s._bubble = text == null || text === '' ? null : { text: fmt(toPrimitive(text)), kind: 'think' }; },
-    setCostume: c => { if (c) { s.costume = String(c); uiDirty = true; } },
+    moveTo: live((x, y) => moveTo(s, num(x), num(y))),
+    turn: live(d => setDir(s, s.dir + num(d))),
+    pointIn: live(d => setDir(s, num(d))),
+    say: live(text => { s._bubble = text == null || text === '' ? null : { text: fmt(toPrimitive(text)), kind: 'say' }; }),
+    think: live(text => { s._bubble = text == null || text === '' ? null : { text: fmt(toPrimitive(text)), kind: 'think' }; }),
+    setCostume: live(c => { if (c) { s.costume = String(c); uiDirty = true; } }),
     getVar: name => getVarObj(String(name)).value,
-    setVar: (name, value) => { getVarObj(String(name)).value = toPrimitive(value); },
-    broadcast: msg => { broadcast(msg); },
-    playNote: (note, secs = 0.5) => playNote(num(note), num(secs), s.volume),
+    setVar: live((name, value) => { getVarObj(String(name)).value = toPrimitive(value); }),
+    broadcast: live(msg => { broadcast(msg); }),
+    playNote: live((note, secs = 0.5) => playNote(num(note), num(secs), s.volume)),
     keyPressed: k => (k === 'any' ? keysDown.size > 0 : keysDown.has(String(k))),
     get mouse() { return { x: mouse.x, y: mouse.y, down: mouse.down }; },
     random: (a, b) => randInt(Math.round(num(a)), Math.round(num(b))),
@@ -1308,7 +1316,7 @@ function openExtensionEditor(existing, { isNew = false } = {}) {
     if (editingId) {
       const i = project.extensions.findIndex(e => e.id === editingId);
       if (i >= 0) {
-        remapExtensionInputs(project.extensions[i], ext);
+        remapExtensionInputs(project.extensions[i], ext, { includeNew: true });
         project.extensions[i] = ext;
       } else {
         project.extensions.push(ext);
