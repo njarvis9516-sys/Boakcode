@@ -24,6 +24,24 @@ python3 -m http.server 8000   # then visit http://localhost:8000
   - Drop a script onto another sprite's tile to copy it to that sprite.
 - **Save**: your work is saved in the browser automatically. **Save** downloads a `.boak.json` file, and **Load** opens one.
 
+## Costumes and sounds
+
+Use the **🧩 Code**, **🖌 Costumes** and **🔊 Sounds** tabs above the blocks.
+
+**Costumes**: each sprite has a list of costumes:
+- **🖌 Paint**: draw your own with the brush, eraser, line, rectangle, ellipse, fill bucket and colour picker. You can change the size, choose filled or outlined shapes, and use undo/redo (Ctrl+Z / Ctrl+Y) and clear. The **+** in the middle of the canvas is the costume's centre, which is where the sprite's position is on the stage.
+- **😀 Emoji**: use any emoji. **Paint on it** turns an emoji costume into a painting you can draw on.
+- **📁 Upload**: import a picture (PNG, JPG, GIF, SVG or WebP). Big pictures are shrunk to fit the stage, and you can paint on uploaded pictures too.
+- The sprite list also has **Paint** and **Upload** tiles for making a new sprite straight from a drawing or a picture.
+- Blocks: `switch costume to [▾]` (by name, number or emoji), `next costume`, `costume number` and `costume name`. Renaming a costume updates the blocks that use it.
+
+**Sounds**: each sprite has a list of sounds:
+- **🎹 Make a sound**: the sound maker is a grid where each column is a step and each row is a note from C4 to C6. Click or drag to add notes, then pick an instrument (piano, organ, 8-bit, bass, bell), a speed and a length. Sounds you make can be edited at any time.
+- **📁 Upload**: import an audio file (MP3, WAV, OGG…). **Imported sounds can't be edited**: you can play, rename or delete them, but not change them.
+- Blocks: `play sound [▾] until done` and `start sound [▾]`, alongside `stop all sounds`, notes, drums and volume.
+
+Pictures and sounds are saved inside the project. Very big ones may not fit in the browser's own storage; if that happens, Boakcode tells you, and you can use **Save** to download the project instead.
+
 ## Extensions
 
 Click **🧩 Extensions** at the bottom of the category list to:
@@ -64,7 +82,8 @@ Extensions are saved inside the project, so they travel with saved project files
 
 - `index.html` is the page layout.
 - `style.css` holds the Scratch-style look, including block shapes per category.
-- `extensions.js` has the extension system: the library, the gallery, the maker/editor, and how extension blocks are registered and run.
+- `extensions.js` has the extension system: the library, the gallery, the maker/editor (with the block coder), and how extension blocks are registered and run.
+- `media.js` has costumes and sounds: the tabs, the paint editor, the sound maker, imports, and sound playback.
 - `app.js` contains:
   - the block definitions (`SPECS`)
   - DOM rendering of blocks

@@ -109,6 +109,8 @@ const Bo = () => ({ k: 'bool', d: '' });
 const M = (opts, d = opts[0]) => ({ k: 'menu', opts, d });
 const V = () => ({ k: 'var' });
 const C = d => ({ k: 'color', d });
+const CO = () => ({ k: 'costume' }); // drop-down of the sprite's costumes (also takes reporters)
+const SN = () => ({ k: 'sound' });   // drop-down of the sprite's sounds (also takes reporters)
 
 // shape: hat | stack | c | reporter | boolean.  "%" marks an input.
 const SPECS = {};
@@ -141,7 +143,8 @@ def('say_for', 'looks', 'stack', 'say % for % seconds', [T('Hello!'), N(2)]);
 def('say', 'looks', 'stack', 'say %', [T('Hello!')]);
 def('think_for', 'looks', 'stack', 'think % for % seconds', [T('Hmm...'), N(2)]);
 def('think', 'looks', 'stack', 'think %', [T('Hmm...')]);
-def('costume', 'looks', 'stack', 'switch costume to %', [T('🐶')]);
+def('costume', 'looks', 'stack', 'switch costume to %', [CO()]);
+def('next_costume', 'looks', 'stack', 'next costume');
 def('change_size', 'looks', 'stack', 'change size by %', [N(10)]);
 def('set_size', 'looks', 'stack', 'set size to % %', [N(100)]);
 def('change_effect', 'looks', 'stack', 'change % effect by %', [M(EFFECTS), N(25)]);
@@ -150,10 +153,13 @@ def('clear_effects', 'looks', 'stack', 'clear graphic effects');
 def('show', 'looks', 'stack', 'show');
 def('hide', 'looks', 'stack', 'hide');
 def('front', 'looks', 'stack', 'go to front layer');
-def('costume_name', 'looks', 'reporter', 'costume');
+def('costume_name', 'looks', 'reporter', 'costume name');
+def('costume_number', 'looks', 'reporter', 'costume number');
 def('size', 'looks', 'reporter', 'size');
 
 // Sound
+def('play_sound_wait', 'sound', 'stack', 'play sound % until done', [SN()]);
+def('start_sound', 'sound', 'stack', 'start sound %', [SN()]);
 def('play_note', 'sound', 'stack', 'play note % for % seconds', [N(60), N(0.5)]);
 def('play_drum', 'sound', 'stack', 'play drum %', [M(['kick', 'snare', 'hi-hat', 'clap'])]);
 def('set_volume', 'sound', 'stack', 'set volume to % %', [N(100)]);
@@ -238,9 +244,9 @@ def('ext_stop', 'myblocks', 'stack', 'stop this block', [], { cap: true });
 const PALETTE = {
   motion: ['move', 'turn_right', 'turn_left', 'goto_random', 'goto_mouse', 'goto_xy', 'glide', 'point_dir',
     'point_mouse', 'change_x', 'set_x', 'change_y', 'set_y', 'bounce', 'rot_style', 'x_pos', 'y_pos', 'direction'],
-  looks: ['say_for', 'say', 'think_for', 'think', 'costume', 'change_size', 'set_size', 'change_effect',
-    'set_effect', 'clear_effects', 'show', 'hide', 'front', 'costume_name', 'size'],
-  sound: ['play_note', 'play_drum', 'set_volume', 'stop_sounds', 'volume'],
+  looks: ['say_for', 'say', 'think_for', 'think', 'costume', 'next_costume', 'change_size', 'set_size',
+    'change_effect', 'set_effect', 'clear_effects', 'show', 'hide', 'front', 'costume_number', 'costume_name', 'size'],
+  sound: ['play_sound_wait', 'start_sound', 'stop_sounds', 'play_note', 'play_drum', 'set_volume', 'volume'],
   events: ['when_flag', 'when_key', 'when_clicked', 'when_receive', 'broadcast', 'broadcast_wait'],
   control: ['wait', 'repeat', 'forever', 'if', 'if_else', 'wait_until', 'repeat_until', 'stop_all'],
   sensing: ['touching_edge', 'touching_mouse', 'key_pressed', 'mouse_down', 'mouse_x', 'mouse_y',
@@ -258,6 +264,11 @@ const specOf = type => SPECS[type] || UNKNOWN_SPEC;
 function defaultInput(spec, i) {
   const a = spec.args[i];
   if (a.k === 'var') return project && project.vars[0] ? project.vars[0].name : 'my variable';
+  if (a.k === 'costume') return project ? currentCostume(currentSprite()).name : 'costume1';
+  if (a.k === 'sound') {
+    const sp = project && currentSprite();
+    return sp && sp.sounds[0] ? sp.sounds[0].name : '';
+  }
   return a.d ?? '';
 }
 function newBlock(type, inputs, bodies) {
@@ -278,19 +289,39 @@ const SPRITE_EMOJI = ['🐶', '🐸', '🦊', '🐼', '🐵', '🚀', '⚽', '�
 
 let project = null;
 
-function makeSprite(name, costume, x = 0, y = 0) {
-  return {
+function makeSprite(name, emoji, x = 0, y = 0) {
+  return attachCostumeAccessor({
     id: 'sp' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-    name, costume, x, y,
+    name, x, y,
+    costumes: [{ name: 'costume1', kind: 'emoji', emoji }],
+    costumeIndex: 0,
+    sounds: [],
     dir: 90, size: 100, visible: true, rotationStyle: 'left-right',
     effects: { color: 0, ghost: 0, brightness: 0 },
     volume: 100, penDown: false, penColor: '#4c97ff', penSize: 1,
     scripts: [],
-  };
+  });
+}
+
+// Projects from before costumes and sounds had a single emoji in sprite.costume.
+function normalizeSprite(raw) {
+  const { costume: legacyEmoji, costumes, costumeIndex, sounds, effects, scripts, ...rest } =
+    raw && typeof raw === 'object' ? raw : {};
+  const s = Object.assign(makeSprite('Sprite', '🐱'), rest);
+  s.costumes = sanitizeCostumes(costumes, typeof legacyEmoji === 'string' ? legacyEmoji : '');
+  s.costumeIndex = clamp(Math.round(num(costumeIndex)), 0, s.costumes.length - 1);
+  s.sounds = sanitizeSounds(sounds);
+  s.effects = Object.assign({ color: 0, ghost: 0, brightness: 0 }, effects);
+  s.scripts = Array.isArray(scripts) ? scripts.filter(sc => sc && Array.isArray(sc.blocks) && sc.blocks.length) : [];
+  return s;
 }
 
 function defaultProject() {
   const boak = makeSprite('Boak', '🐱');
+  boak.sounds = [{
+    name: 'Boak tune', kind: 'made', instrument: 'piano', tempo: 160, length: 8,
+    notes: [[0, 14], [1, 12], [2, 10], [3, 7], [5, 10], [6, 7]],
+  }];
   boak.scripts = [
     { x: 24, y: 24, blocks: [
       B('when_flag'),
@@ -299,7 +330,7 @@ function defaultProject() {
     ] },
     { x: 300, y: 24, blocks: [
       B('when_clicked'),
-      B('play_note', [72, 0.2]),
+      B('start_sound', ['Boak tune']),
       B('repeat', [6], [[B('change_effect', ['color', 25]), B('change_size', [8])]]),
       B('set_size', [100]),
       B('clear_effects'),
@@ -320,13 +351,7 @@ function normalizeProject(p) {
   p.title = String(p.title || 'Untitled');
   p.vars = Array.isArray(p.vars) ? p.vars : [];
   p.extensions = dedupeExtensionIds(Array.isArray(p.extensions) ? p.extensions.map(normalizeExtension) : []);
-  p.sprites = p.sprites.map(s => {
-    const base = makeSprite('Sprite', '🐱');
-    const out = Object.assign(base, s);
-    out.effects = Object.assign({ color: 0, ghost: 0, brightness: 0 }, s.effects);
-    out.scripts = Array.isArray(s.scripts) ? s.scripts.filter(sc => sc && Array.isArray(sc.blocks) && sc.blocks.length) : [];
-    return out;
-  });
+  p.sprites = p.sprites.map(normalizeSprite);
   if (!p.sprites.some(s => s.id === p.selected)) p.selected = p.sprites[0].id;
   return p;
 }
@@ -338,8 +363,19 @@ let saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { localStorage.setItem(STORAGE_KEY, serialize()); } catch { /* storage unavailable */ }
+    try {
+      localStorage.setItem(STORAGE_KEY, serialize());
+    } catch (err) {
+      warnStorageFull(err);
+    }
   }, 250);
+}
+// Pictures and sounds can make a project bigger than the browser will store; say so once.
+let storageWarned = false;
+function warnStorageFull(err) {
+  if (storageWarned || !err || (err.name !== 'QuotaExceededError' && err.code !== 22)) return;
+  storageWarned = true;
+  toast("This project is too big to keep in the browser. Use Save to download it so you don't lose your work.");
 }
 function loadInitial() {
   try {
@@ -506,6 +542,26 @@ function renderInput(b, i, a) {
     }
     return slot;
   }
+  if (a.k === 'costume' || a.k === 'sound') {
+    const slot = el('span', 'slot drop-slot slot-menu');
+    slot._owner = b;
+    slot._index = i;
+    slot._kind = 'text';
+    if (v && typeof v === 'object') {
+      slot.classList.add('filled');
+      slot.appendChild(renderBlock(v));
+      return slot;
+    }
+    const sel = el('select', 'menu');
+    const sp = currentSprite();
+    const opts = a.k === 'costume' ? costumeNames(sp) : soundNames(sp);
+    if (!opts.includes(String(v))) opts.unshift(String(v));
+    for (const o of opts) sel.appendChild(new Option(o === '' ? (a.k === 'sound' ? '(no sounds)' : '(none)') : o, o));
+    sel.value = String(v);
+    sel.addEventListener('change', () => { b.inputs[i] = sel.value; save(); });
+    slot.appendChild(sel);
+    return slot;
+  }
   if (a.k === 'menu' || a.k === 'var') {
     const sel = el('select', 'menu');
     const opts = a.k === 'var' ? project.vars.map(x => x.name) : [...a.opts];
@@ -576,7 +632,9 @@ function renderPalette() {
       renderVariableSection(sec);
     } else {
       for (const type of c.types || PALETTE[c.id]) {
-        if (!paletteTemplates[type]) paletteTemplates[type] = newBlock(type);
+        // Costume and sound drop-downs depend on the current sprite, so build those fresh.
+        const perSprite = SPECS[type].args.some(a => a.k === 'costume' || a.k === 'sound');
+        if (!paletteTemplates[type] || perSprite) paletteTemplates[type] = newBlock(type);
         const item = el('div', 'pal-item');
         item.appendChild(renderBlock(paletteTemplates[type]));
         sec.appendChild(item);
@@ -1068,7 +1126,11 @@ let timerStart = performance.now();
 let answer = '';
 let uiDirty = true;
 
-const spriteRadius = s => s.size * 0.24;
+function spriteRadius(s) {
+  const c = currentCostume(s);
+  if (c && c.kind === 'image') return Math.max(4, Math.max(c.w, c.h) / 2 * s.size / 100);
+  return s.size * 0.24;
+}
 const toCanvasX = x => STAGE_W / 2 + x;
 const toCanvasY = y => STAGE_H / 2 - y;
 
@@ -1355,11 +1417,8 @@ async function exec(t, b) {
       s._bubble = text === '' ? null : { text, kind: b.type };
       break;
     }
-    case 'costume': {
-      const c = String(await I(0)).trim();
-      if (c) { s.costume = c; uiDirty = true; }
-      break;
-    }
+    case 'costume': switchCostume(s, await I(0)); break;
+    case 'next_costume': nextCostume(s); break;
     case 'change_size': s.size = clamp(s.size + num(await I(0)), 5, 500); break;
     case 'set_size': s.size = clamp(num(await I(0)), 5, 500); break;
     case 'change_effect': {
@@ -1390,6 +1449,20 @@ async function exec(t, b) {
       break;
     case 'set_volume': s.volume = clamp(num(await I(0)), 0, 100); break;
     case 'stop_sounds': stopSounds(); break;
+    case 'start_sound':
+    case 'play_sound_wait': {
+      const snd = findSound(s, await I(0));
+      if (!snd) break;
+      try {
+        await prepareSound(snd);
+      } catch {
+        break; // a sound this browser can't decode is skipped
+      }
+      if (t.stopped) throw STOP;
+      const secs = playSoundNow(snd, s.volume);
+      if (b.type === 'play_sound_wait') await waitSecs(t, secs);
+      break;
+    }
 
     // Events
     case 'broadcast': broadcast(await I(0)); break;
@@ -1483,7 +1556,8 @@ async function evalReporter(t, b) {
     case 'x_pos': return Math.round(s.x * 1e6) / 1e6;
     case 'y_pos': return Math.round(s.y * 1e6) / 1e6;
     case 'direction': return s.dir;
-    case 'costume_name': return s.costume;
+    case 'costume_name': return currentCostume(s).name;
+    case 'costume_number': return s.costumeIndex + 1;
     case 'size': return Math.round(s.size);
     case 'volume': return s.volume;
 
@@ -1570,11 +1644,18 @@ function drawSprite(c, s) {
   if (fx.brightness) filters.push(`brightness(${clamp(100 + fx.brightness, 0, 200)}%)`);
   c.filter = filters.length ? filters.join(' ') : 'none';
   c.globalAlpha = 1 - clamp(fx.ghost || 0, 0, 100) / 100;
-  c.font = `${px}px ${EMOJI_FONT}`;
-  c.textAlign = 'center';
-  c.textBaseline = 'middle';
-  c.fillStyle = '#333';
-  c.fillText(s.costume, 0, px * 0.06);
+  const cos = currentCostume(s);
+  if (cos.kind === 'image') {
+    const img = costumeImage(cos);
+    const k = s.size / 100;
+    if (img) c.drawImage(img, -cos.cx * k, -cos.cy * k, cos.w * k, cos.h * k);
+  } else {
+    c.font = `${px}px ${EMOJI_FONT}`;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillStyle = '#333';
+    c.fillText(cos.emoji, 0, px * 0.06);
+  }
   c.restore();
 }
 
@@ -1692,7 +1773,7 @@ function render() {
   }
   $('#btn-flag').classList.toggle('active', threads.size > 0);
   if (paletteDirty && !drag) renderPalette();
-  if (uiDirty) { renderSprites(); uiDirty = false; }
+  if (uiDirty) { renderSprites(); mediaUiTick(); uiDirty = false; }
   if (++frameCount % 6 === 0) refreshSpriteInfo();
   pollExtensionHats();
   requestAnimationFrame(render);
@@ -1785,15 +1866,17 @@ $('#btn-stop').addEventListener('click', stopAll);
 // ---------------------------------------------------------------------------
 const spriteListEl = $('#sprite-list');
 const si = {
-  name: $('#si-name'), costume: $('#si-costume'), x: $('#si-x'), y: $('#si-y'),
+  name: $('#si-name'), x: $('#si-x'), y: $('#si-y'),
   size: $('#si-size'), dir: $('#si-dir'), show: $('#si-show'),
 };
 
 function selectSprite(s) {
   project.selected = s.id;
+  paletteDirty = true; // costume and sound drop-downs belong to the selected sprite
   renderWorkspace();
   renderSprites();
   refreshSpriteInfo(true);
+  renderActiveMediaPanel();
   save();
 }
 
@@ -1803,7 +1886,7 @@ function renderSprites() {
     const tile = el('div', 'sprite-tile' + (s.id === project.selected ? ' selected' : ''));
     tile._sprite = s;
     tile.title = s.name;
-    tile.append(el('span', 'emoji', s.costume), el('span', 'name', s.name));
+    tile.append(costumeThumb(currentCostume(s), 'emoji'), el('span', 'name', s.name));
     tile.addEventListener('click', () => selectSprite(s));
     if (s.id === project.selected && project.sprites.length > 1) {
       const del = el('button', 'del', '×');
@@ -1820,18 +1903,57 @@ function renderSprites() {
     }
     spriteListEl.appendChild(tile);
   }
-  const add = el('div', 'sprite-tile add');
-  add.title = 'Add a sprite';
-  add.append(el('span', 'emoji', '+'), el('span', 'name', 'New sprite'));
-  add.addEventListener('click', addSprite);
-  spriteListEl.appendChild(add);
+  for (const [icon, label, title, fn] of [
+    ['+', 'New sprite', 'Add a sprite', addSprite],
+    ['🖌', 'Paint', 'Paint a new sprite', paintSprite],
+    ['📁', 'Upload', 'Upload a picture as a new sprite', uploadSprite],
+  ]) {
+    const add = el('div', 'sprite-tile add');
+    add.title = title;
+    add.tabIndex = 0;
+    add.setAttribute('role', 'button');
+    add.append(el('span', 'emoji', icon), el('span', 'name', label));
+    add.addEventListener('click', fn);
+    add.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } });
+    spriteListEl.appendChild(add);
+  }
+}
+
+function nextSpriteName() {
+  let n = project.sprites.length + 1;
+  while (project.sprites.some(s => s.name === 'Sprite' + n)) n++;
+  return 'Sprite' + n;
+}
+
+function paintSprite() {
+  const s = makeSprite(nextSpriteName(), '🐱');
+  s.costumes = [{ name: 'costume1', kind: 'image', dataURL: '', w: 0, h: 0, cx: 0, cy: 0 }];
+  project.sprites.push(s);
+  selectSprite(s);
+  setTab('costumes');
+}
+
+function uploadSprite() {
+  pickFiles('image/*', async files => {
+    for (const f of files) {
+      try {
+        const c = await imageFileToCostume(f, []);
+        const s = makeSprite(c.name || nextSpriteName(), '🐱', randInt(-150, 150), randInt(-100, 100));
+        c.name = 'costume1';
+        s.costumes = [c];
+        project.sprites.push(s);
+        selectSprite(s);
+        warnIfBig(c.dataURL, `"${s.name}"`);
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+  });
 }
 
 function addSprite() {
   const emoji = SPRITE_EMOJI[Math.floor(Math.random() * SPRITE_EMOJI.length)];
-  let n = project.sprites.length + 1;
-  while (project.sprites.some(s => s.name === 'Sprite' + n)) n++;
-  const s = makeSprite('Sprite' + n, emoji, randInt(-150, 150), randInt(-100, 100));
+  const s = makeSprite(nextSpriteName(), emoji, randInt(-150, 150), randInt(-100, 100));
   project.sprites.push(s);
   selectSprite(s);
 }
@@ -1840,7 +1962,6 @@ function refreshSpriteInfo(force) {
   const s = currentSprite();
   const set = (inp, v) => { if (force || document.activeElement !== inp) inp.value = v; };
   set(si.name, s.name);
-  set(si.costume, s.costume);
   set(si.x, Math.round(s.x));
   set(si.y, Math.round(s.y));
   set(si.size, Math.round(s.size));
@@ -1851,10 +1972,6 @@ function refreshSpriteInfo(force) {
 si.name.addEventListener('input', () => {
   const v = si.name.value.trim();
   if (v) { currentSprite().name = v; uiDirty = true; save(); }
-});
-si.costume.addEventListener('input', () => {
-  const v = si.costume.value.trim();
-  if (v) { currentSprite().costume = v; uiDirty = true; save(); }
 });
 for (const [key, fn] of [
   ['x', (s, v) => moveTo(s, v, s.y)],
@@ -1888,6 +2005,7 @@ function loadProject(p) {
   renderSprites();
   refreshSpriteInfo(true);
   updateActiveCategory();
+  renderActiveMediaPanel();
   save();
 }
 
@@ -1920,7 +2038,7 @@ fileInput.addEventListener('change', async () => {
 });
 
 window.addEventListener('beforeunload', () => {
-  try { localStorage.setItem(STORAGE_KEY, serialize()); } catch { /* ignore */ }
+  try { localStorage.setItem(STORAGE_KEY, serialize()); } catch { /* too big or unavailable: already warned */ }
 });
 
 // ---------------------------------------------------------------------------
