@@ -165,7 +165,9 @@ const EXT_LIBRARY = [
       { opcode: 'spin', type: 'command', text: 'spin around [TIMES] times',
         args: [{ name: 'TIMES', type: 'number', default: 1 }],
         code: [
-          'const style = sprite.rotationStyle;',
+          '// Remember the real style once, even if a spin restarts while another is running.',
+          'if (!sprite._spins) sprite._spinStyle = sprite.rotationStyle;',
+          'sprite._spins = (sprite._spins || 0) + 1;',
           'sprite.rotationStyle = \'all around\';',
           'try {',
           '  for (let i = 0; i < args.TIMES * 24; i++) {',
@@ -173,7 +175,8 @@ const EXT_LIBRARY = [
           '    await util.frame();',
           '  }',
           '} finally {',
-          '  sprite.rotationStyle = style; // restore it even if the block is stopped',
+          '  sprite._spins--;',
+          '  if (!sprite._spins) sprite.rotationStyle = sprite._spinStyle; // even if stopped',
           '}',
         ].join('\n') },
       { opcode: 'jump', type: 'command', text: 'jump [HEIGHT] high',
@@ -393,6 +396,7 @@ function registerExtensions(list) {
 }
 
 function refreshExtensions() {
+  stopExtensionHats(); // edited hats start checking afresh
   registerExtensions(project.extensions);
   renderCategories();
   renderPalette();
@@ -402,7 +406,7 @@ function refreshExtensions() {
 }
 
 // Visit every block in the project: sprite scripts and block-coded extension blocks.
-function walkAllBlocks(fn) {
+function walkAllBlocks(fn, extraExts = []) {
   const walkList = list => { if (Array.isArray(list)) for (const b of list) walkBlock(b); };
   const walkBlock = b => {
     if (!b || typeof b !== 'object' || typeof b.type !== 'string' || !Array.isArray(b.inputs)) return;
@@ -411,7 +415,9 @@ function walkAllBlocks(fn) {
     if (Array.isArray(b.bodies)) b.bodies.forEach(walkList);
   };
   for (const s of project.sprites) for (const sc of s.scripts) walkList(sc.blocks);
-  for (const ext of project.extensions) for (const blk of ext.blocks) for (const sc of blk.scripts || []) walkList(sc.blocks);
+  for (const ext of [...project.extensions, ...extraExts]) {
+    for (const blk of ext.blocks) for (const sc of blk.scripts || []) walkList(sc.blocks);
+  }
 }
 
 // Placed blocks store their input values by position. When an extension is replaced by a
@@ -438,7 +444,7 @@ function remapExtensionInputs(oldExt, newExt) {
         (a.type === 'menu' && !menuOptions(a).includes(String(v)));
       return stale ? argSpec(a).d : v;
     });
-  });
+  }, [newExt]); // the new version's own blocks can use each other too
 }
 
 function blockUseCount(ext) {
@@ -531,7 +537,7 @@ async function runExtBlock(t, b) {
     return spec.shape === 'boolean' ? extToBool(result) : toPrimitive(result);
   } catch (err) {
     if (err === STOP) throw err;
-    extError(x, err);
+    extError(x, err, t.hatCheck);
     return spec.shape === 'boolean' ? false : '';
   }
 }
@@ -539,7 +545,7 @@ async function runExtBlock(t, b) {
 // Extension hats are edge-triggered: every frame each script that starts with one is
 // re-checked, and the script starts when its condition turns from false to true.
 const hatLastValue = new WeakMap(); // script -> condition result the last time it was checked
-const hatBusy = new WeakSet();      // scripts whose hat is still being checked
+const hatBusy = new WeakMap();      // script -> generation of the hat check still running for it
 const hatThreads = new Set();       // threads checking hats right now, so Stop can end them
 let hatGeneration = 0;              // bumped by Stop and project loads to discard old checks
 
@@ -549,7 +555,7 @@ function pollExtensionHats() {
     for (const script of sprite.scripts) {
       const hat = script.blocks[0];
       const spec = hat && SPECS[hat.type];
-      if (spec && spec.ext && spec.shape === 'hat' && !hatBusy.has(script)) checkHat(sprite, script, hat, spec);
+      if (spec && spec.ext && spec.shape === 'hat' && hatBusy.get(script) !== hatGeneration) checkHat(sprite, script, hat, spec);
     }
   }
 }
@@ -557,15 +563,16 @@ function pollExtensionHats() {
 async function checkHat(sprite, script, hat, spec) {
   const gen = hatGeneration;
   const t = new Thread(sprite, null);
-  hatBusy.add(script);
+  t.hatCheck = true;
+  hatBusy.set(script, gen);
   hatThreads.add(t);
   let now = false;
   try {
     now = extToBool(await callExtension(t, spec.ext, await extArgs(t, hat, spec.ext.argDefs)));
   } catch (err) {
-    if (err !== STOP) extError(spec.ext, err);
+    if (err !== STOP) extError(spec.ext, err, true);
   } finally {
-    hatBusy.delete(script);
+    if (hatBusy.get(script) === gen) hatBusy.delete(script);
     hatThreads.delete(t);
   }
   // Ignore answers that arrive after Stop, a project load, or the script being changed.
@@ -583,10 +590,16 @@ function stopExtensionHats() {
 
 // Report a broken extension block at most once every few seconds, so a block that fails
 // every frame (in a loop or a hat) doesn't flood the screen.
-function extError(x, err) {
+// Errors from hat checks (which run every frame, even when nothing is running) are
+// reported only once per version of the block.
+function extError(x, err, once = false) {
   const message = err && err.message ? err.message : String(err);
+  if (once) {
+    if (x.reportedFromHat) return;
+    x.reportedFromHat = true;
+  }
   const now = performance.now();
-  if (x.lastErrorAt && now - x.lastErrorAt < 5000) return;
+  if (x.lastErrorAt && now - x.lastErrorAt < 10000) return;
   x.lastErrorAt = now;
   console.error(`[${x.ext.name}] "${x.blk.text}":`, message);
   toast(`Error in ${x.ext.name} block "${x.blk.text}": ${message}`);
@@ -901,7 +914,15 @@ function openExtensionEditor(existing, { isNew = false } = {}) {
 
   const m = openModal(editingId ? `Edit extension — ${draft.name}` : 'Make an extension', { wide: true, dismissable: false });
   if (!m) return;
-  const stopTry = () => { if (tryThread) tryThread.stopped = true; };
+  // Ending a Try-it run takes effect at once, even if its code is stuck on its own wait.
+  let tryKey = null, tryReset = null;
+  const stopTry = () => {
+    if (!tryThread) return;
+    tryThread.stopped = true;
+    if (threads.get(tryKey) === tryThread) threads.delete(tryKey);
+    tryThread = null;
+    if (tryReset) tryReset();
+  };
   const dropCoder = () => { if (coderSurface) { removeSurface(coderSurface); coderSurface = null; } };
   m.onClose = () => {
     if (dirty && !confirm('Close without saving your changes?')) return false;
@@ -1148,7 +1169,7 @@ function openExtensionEditor(existing, { isNew = false } = {}) {
     const tryBtn = el('button', 'btn small', tryLabel);
     tryBtn.type = 'button';
     tryBtn.addEventListener('click', async () => {
-      if (tryThread) { tryThread.stopped = true; return; }
+      if (tryThread) { stopTry(); return; }
       const spec = buildExtSpec(draft, blk, '__preview_try');
       SPECS['__preview_try'] = spec;
       const b = newBlock('__preview_try');
@@ -1159,25 +1180,31 @@ function openExtensionEditor(existing, { isNew = false } = {}) {
       const t = new Thread(sprite, key);
       threads.set(key, t);
       tryThread = t;
+      tryKey = key;
+      tryReset = () => { tryBtn.textContent = tryLabel; result.className = 'ed-result'; result.textContent = 'Stopped'; };
       tryBtn.textContent = '■ Stop';
       result.className = 'ed-result';
       result.textContent = 'Running…';
       try {
         const value = await callExtension(t, spec.ext, await extArgs(t, b, spec.ext.argDefs));
-        if (t.stopped) throw STOP;
+        if (t.stopped) {
+          // Stopped by the editor (already shown) or by the main Stop button (show it now).
+          if (tryThread === t) { result.className = 'ed-result'; result.textContent = 'Stopped'; }
+          return;
+        }
         result.className = 'ed-result ok';
         result.textContent =
           blk.type === 'command' ? '✓ Ran without errors'
             : blk.type === 'hat' ? '✓ Right now the condition is ' + extToBool(value) + (extToBool(value) ? ' — scripts would start' : '')
               : '✓ Reported: ' + fmt(blk.type === 'boolean' ? extToBool(value) : toPrimitive(value));
       } catch (err) {
+        if (t.stopped && tryThread !== t) return; // already reported as stopped
         result.className = 'ed-result' + (err === STOP ? '' : ' err');
         result.textContent = err === STOP ? 'Stopped' : '✗ ' + (err && err.message ? err.message : String(err));
       } finally {
         t.finished = true;
         if (threads.get(key) === t) threads.delete(key);
-        if (tryThread === t) tryThread = null;
-        tryBtn.textContent = tryLabel;
+        if (tryThread === t) { tryThread = null; tryBtn.textContent = tryLabel; }
       }
     });
 
