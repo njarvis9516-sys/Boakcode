@@ -28,16 +28,23 @@ python3 -m http.server 8000   # then visit http://localhost:8000
 
 Click **🧩 Extensions** at the bottom of the category list to:
 
-- **Add from the library**: Text Tools, Math Plus, Date & Time (including a "when timer is over" hat) and Fun Effects (including a "when mouse is closer than" hat).
+- **Add from the library**: Text Tools, Math Plus, Date & Time and Fun Effects. They include two hats ("when timer is over" and "when mouse is closer than") and two blocks built with the block coder ("average of" and "wiggle").
 - **Make your own** with the extension maker:
   1. Pick a name and colour.
-  2. Add blocks. Each block is a *command* (stack block), *reporter* (round), *boolean* (pointy) or *hat* (a "when…" block). A hat's code returns true or false. Boakcode checks it every frame and starts the scripts underneath when it changes from false to true.
+  2. Add blocks with the **＋ Command**, **＋ Reporter**, **＋ Boolean** and **＋ Hat** buttons:
+     - a *command* is a stack block
+     - a *reporter* is round and reports a value
+     - a *boolean* is pointy and reports true or false
+     - a *hat* is a "when…" block whose scripts start when its answer changes from false to true (it's checked every frame)
   3. Write each block's text, using `[NAME]` for inputs, e.g. `greet [NAME] [TIMES] times`. Inputs can be numbers, text, booleans or drop-down menus.
-  4. Write the JavaScript the block runs. The editor checks for syntax errors as you type, and **Try it** runs the block on the current sprite. **What can my code use?** lists the helpers available, such as `util.wait`, `util.say`, `util.moveTo` and `util.getVar`.
+  4. Choose how to code it:
+     - **🧩 Blocks**: snap ordinary Boakcode blocks together under the pink `define` block, just like Scratch's "Make a Block". The **This block** section has a reporter for each input to drag into slots, plus `report` (send back a value) and `stop this block`.
+     - **{ } JavaScript**: write code. The editor checks for syntax errors as you type, and **What can my code use?** lists helpers such as `util.wait`, `util.say`, `util.moveTo` and `util.getVar`.
+  5. **Try it** runs the block on the current sprite. While it's running, the same button stops it.
 - **Edit** any extension with the **Edit** button next to its name in the palette, or from the Extensions window.
 - **Share**: **Export** downloads a `.boakext.json` file, and **Load extension file…** imports one.
 
-Extensions are saved inside the project, so they travel with saved project files. Extension code is ordinary JavaScript running in the page, so Boakcode asks you to confirm before loading extensions from files. Only load extensions from people you trust.
+Extensions are saved inside the project, so they travel with saved project files. If you change a block's inputs later, values already typed into that block in your scripts move to the right inputs. Extension code is ordinary JavaScript running in the page, so Boakcode asks you to confirm before loading extensions from files. Only load extensions from people you trust.
 
 ### Block categories
 
