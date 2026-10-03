@@ -298,13 +298,17 @@ function defaultProject() {
       B('glide', [0.5, B('random', [-200, 200]), B('random', [-140, 140])]),
     ] },
   ];
-  return { title: 'Untitled', sprites: [boak], selected: boak.id, vars: [{ name: 'my variable', value: 0, shown: false }] };
+  return {
+    title: 'Untitled', sprites: [boak], selected: boak.id,
+    vars: [{ name: 'my variable', value: 0, shown: false }], extensions: [],
+  };
 }
 
 function normalizeProject(p) {
   if (!p || !Array.isArray(p.sprites) || p.sprites.length === 0) throw new Error('Not a Boakcode project');
   p.title = String(p.title || 'Untitled');
   p.vars = Array.isArray(p.vars) ? p.vars : [];
+  p.extensions = Array.isArray(p.extensions) ? p.extensions.map(normalizeExtension) : [];
   p.sprites = p.sprites.map(s => {
     const base = makeSprite('Sprite', '🐱');
     const out = Object.assign(base, s);
@@ -411,6 +415,10 @@ function renderBlock(b) {
   }
   const e = el('div', `block shape-${spec.shape} cat-${spec.cat}`);
   e._block = b;
+  if (spec.color) {
+    e.style.setProperty('--c', spec.color);
+    e.style.setProperty('--cd', spec.colorDark);
+  }
   if (b.type === 'var_get') {
     const row = el('div', 'row');
     row.appendChild(renderLabel(String(b.inputs[0])));
@@ -494,7 +502,7 @@ let paletteDirty = false;
 
 function renderCategories() {
   categoriesEl.innerHTML = '';
-  for (const c of CATS) {
+  for (const c of allCats()) {
     const btn = el('button', 'cat-btn');
     btn.type = 'button';
     btn.dataset.cat = c.id;
@@ -507,19 +515,34 @@ function renderCategories() {
     });
     categoriesEl.appendChild(btn);
   }
+  const add = el('button', 'cat-btn ext-add');
+  add.type = 'button';
+  add.title = 'Add, make or edit extensions';
+  add.append(el('span', 'ext-add-icon', '🧩'), 'Extensions');
+  add.addEventListener('click', openExtensionGallery);
+  categoriesEl.appendChild(add);
 }
 
 function renderPalette() {
   const scroll = paletteEl.scrollTop;
   paletteEl.innerHTML = '';
-  for (const c of CATS) {
+  for (const c of allCats()) {
     const sec = el('div', 'pal-section');
     sec.dataset.section = c.id;
-    sec.appendChild(el('h3', null, c.name));
+    const h = el('h3', null, c.name);
+    sec.appendChild(h);
+    if (c.ext) {
+      const edit = el('button', 'pal-edit', 'Edit');
+      edit.type = 'button';
+      edit.title = 'Edit this extension';
+      edit.addEventListener('click', () => openExtensionEditor(c.ext));
+      h.appendChild(edit);
+      if (!c.types.length) sec.appendChild(el('p', 'pal-empty', 'No blocks yet.'));
+    }
     if (c.id === 'variables') {
       renderVariableSection(sec);
     } else {
-      for (const type of PALETTE[c.id]) {
+      for (const type of c.types || PALETTE[c.id]) {
         if (!paletteTemplates[type]) paletteTemplates[type] = newBlock(type);
         const item = el('div', 'pal-item');
         item.appendChild(renderBlock(paletteTemplates[type]));
@@ -1345,7 +1368,8 @@ async function exec(t, b) {
     case 'change_pen_size': s.penSize = clamp(s.penSize + num(await I(0)), 1, 200); break;
 
     default:
-      // Hats are markers; reporters dropped loose in a stack do nothing.
+      // Extension blocks run their own code; hats are markers and loose reporters do nothing.
+      if (SPECS[b.type] && SPECS[b.type].ext && SPECS[b.type].shape !== 'hat') await runExtBlock(t, b);
       break;
   }
 }
@@ -1420,6 +1444,7 @@ async function evalReporter(t, b) {
     }
     case 'var_get': return getVarObj(b.inputs[0]).value;
   }
+  if (SPECS[b.type] && SPECS[b.type].ext) return runExtBlock(t, b);
   return '';
 }
 
@@ -1563,6 +1588,7 @@ function render() {
   if (paletteDirty && !drag) renderPalette();
   if (uiDirty) { renderSprites(); uiDirty = false; }
   if (++frameCount % 6 === 0) refreshSpriteInfo();
+  pollExtensionHats();
   requestAnimationFrame(render);
 }
 
@@ -1748,6 +1774,8 @@ function loadProject(p) {
   penCtx.restore();
   for (const k of Object.keys(paletteTemplates)) delete paletteTemplates[k];
   titleInput.value = project.title;
+  registerExtensions(project.extensions);
+  renderCategories();
   renderPalette();
   renderWorkspace();
   renderSprites();
@@ -1775,7 +1803,9 @@ fileInput.addEventListener('change', async () => {
   fileInput.value = '';
   if (!file) return;
   try {
-    loadProject(normalizeProject(JSON.parse(await file.text())));
+    const p = normalizeProject(JSON.parse(await file.text()));
+    if (p.extensions.length && !confirmExtensionCode(`This project includes ${p.extensions.length} extension(s)`)) return;
+    loadProject(p);
   } catch (err) {
     alert('Could not load that file: ' + err.message);
   }
@@ -1788,7 +1818,6 @@ window.addEventListener('beforeunload', () => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-renderCategories();
 loadProject(loadInitial());
 updateActiveCategory();
 requestAnimationFrame(render);
