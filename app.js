@@ -229,6 +229,12 @@ def('change_pen_hue', 'pen', 'stack', 'change pen color by %', [N(10)]);
 def('pen_size', 'pen', 'stack', 'set pen size to %', [N(1)]);
 def('change_pen_size', 'pen', 'stack', 'change pen size by %', [N(1)]);
 
+// Used by the extension maker's block coder (not shown in the main palette).
+def('ext_define', 'myblocks', 'hat', 'define %', [T('')]);
+def('ext_arg', 'myblocks', 'reporter', '%', [T('')]);
+def('ext_report', 'myblocks', 'stack', 'report %', [T('')], { cap: true });
+def('ext_stop', 'myblocks', 'stack', 'stop this block', [], { cap: true });
+
 const PALETTE = {
   motion: ['move', 'turn_right', 'turn_left', 'goto_random', 'goto_mouse', 'goto_xy', 'glide', 'point_dir',
     'point_mouse', 'change_x', 'set_x', 'change_y', 'set_y', 'bounce', 'rot_style', 'x_pos', 'y_pos', 'direction'],
@@ -243,6 +249,11 @@ const PALETTE = {
     'letter_of', 'length', 'contains', 'mod', 'round', 'mathop'],
   pen: ['pen_clear', 'stamp', 'pen_down', 'pen_up', 'pen_color', 'change_pen_hue', 'pen_size', 'change_pen_size'],
 };
+
+// Blocks whose type is unknown (for example from a removed extension) still render,
+// drag and run (as a do-nothing stack block) instead of breaking the editor.
+const UNKNOWN_SPEC = { type: 'unknown', cat: 'unknown', shape: 'stack', text: 'unknown block', args: [] };
+const specOf = type => SPECS[type] || UNKNOWN_SPEC;
 
 function defaultInput(spec, i) {
   const a = spec.args[i];
@@ -308,7 +319,7 @@ function normalizeProject(p) {
   if (!p || !Array.isArray(p.sprites) || p.sprites.length === 0) throw new Error('Not a Boakcode project');
   p.title = String(p.title || 'Untitled');
   p.vars = Array.isArray(p.vars) ? p.vars : [];
-  p.extensions = Array.isArray(p.extensions) ? p.extensions.map(normalizeExtension) : [];
+  p.extensions = dedupeExtensionIds(Array.isArray(p.extensions) ? p.extensions.map(normalizeExtension) : []);
   p.sprites = p.sprites.map(s => {
     const base = makeSprite('Sprite', '🐱');
     const out = Object.assign(base, s);
@@ -321,7 +332,7 @@ function normalizeProject(p) {
 }
 
 function serialize() {
-  return JSON.stringify(project, (k, v) => (k.startsWith('_') ? undefined : v), 1);
+  return JSON.stringify(project, (k, v) => (k.startsWith('_') ? undefined : typeof v === 'bigint' ? String(v) : v), 1);
 }
 let saveTimer = null;
 function save() {
@@ -375,7 +386,10 @@ function locateIn(target, b) {
   return null;
 }
 function locateInSprite(sprite, target) {
-  for (const script of sprite.scripts) {
+  return locateInScripts(sprite.scripts, target);
+}
+function locateInScripts(scripts, target) {
+  for (const script of scripts) {
     const r = locate(target, script.blocks);
     if (r) return { ...r, script };
   }
@@ -413,13 +427,32 @@ function renderBlock(b) {
     unknown.appendChild(el('div', 'row', 'unknown block'));
     return unknown;
   }
+  if (!Array.isArray(b.inputs)) b.inputs = [];
+  for (let i = b.inputs.length; i < spec.args.length; i++) b.inputs.push(defaultInput(spec, i));
+  if (spec.shape === 'c') {
+    if (!Array.isArray(b.bodies)) b.bodies = [];
+    const n = Array.isArray(spec.text) ? spec.text.length : 1;
+    while (b.bodies.length < n) b.bodies.push([]);
+  }
   const e = el('div', `block shape-${spec.shape} cat-${spec.cat}`);
   e._block = b;
   if (spec.color) {
     e.style.setProperty('--c', spec.color);
     e.style.setProperty('--cd', spec.colorDark);
   }
-  if (b.type === 'var_get') {
+  if (b.type === 'ext_define') {
+    // "define" + the extension block's text, with its inputs shown as pills.
+    const row = el('div', 'row');
+    row.appendChild(renderLabel('define'));
+    for (const part of String(b.inputs[0]).split(/(\[[A-Za-z_][A-Za-z0-9_]*\])/)) {
+      const m = /^\[(.+)\]$/.exec(part);
+      if (m) row.appendChild(el('span', 'arg-pill', m[1]));
+      else if (part.trim()) row.appendChild(renderLabel(part.trim()));
+    }
+    e.appendChild(row);
+    return e;
+  }
+  if (b.type === 'var_get' || b.type === 'ext_arg') {
     const row = el('div', 'row');
     row.appendChild(renderLabel(String(b.inputs[0])));
     e.appendChild(row);
@@ -611,17 +644,21 @@ const wsEl = $('#workspace');
 const wsCanvas = $('#ws-canvas');
 const wsHint = $('#ws-hint');
 
-function renderWorkspace() {
-  wsCanvas.innerHTML = '';
-  const sp = currentSprite();
-  for (const script of sp.scripts) {
+function renderScripts(canvasEl, scripts) {
+  canvasEl.innerHTML = '';
+  for (const script of scripts) {
     const d = el('div', 'script');
     d.style.left = script.x + 'px';
     d.style.top = script.y + 'px';
     d._script = script;
     d.appendChild(renderStack(script.blocks, true));
-    wsCanvas.appendChild(d);
+    canvasEl.appendChild(d);
   }
+}
+
+function renderWorkspace() {
+  const sp = currentSprite();
+  renderScripts(wsCanvas, sp.scripts);
   wsHint.hidden = sp.scripts.length > 0;
 }
 
@@ -639,6 +676,37 @@ function cleanUp() {
   save();
 }
 $('#btn-cleanup').addEventListener('click', cleanUp);
+
+// A surface is a palette + workspace pair that blocks can be dragged between.
+// The main editor is one; the extension maker's block coder registers its own.
+const mainSurface = {
+  palette: paletteEl,
+  deleteAreas: [paletteEl, categoriesEl],
+  ws: wsEl,
+  canvas: wsCanvas,
+  get scripts() { return currentSprite().scripts; },
+  render: () => renderWorkspace(),
+  changed: () => save(),
+  copyToSprites: true,
+  cleanUp: () => cleanUp(),
+};
+const surfaces = [mainSurface];
+function addSurface(sf) {
+  surfaces.push(sf);
+  attachWorkspaceMenu(sf);
+}
+function removeSurface(sf) {
+  const i = surfaces.indexOf(sf);
+  if (i > 0) surfaces.splice(i, 1);
+}
+function surfaceOf(node) {
+  for (let i = surfaces.length - 1; i >= 0; i--) {
+    const sf = surfaces[i];
+    if (sf.palette.contains(node)) return { surface: sf, fromPalette: true };
+    if (sf.ws.contains(node)) return { surface: sf, fromPalette: false };
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Drag & drop
@@ -659,10 +727,13 @@ document.addEventListener('pointerdown', e => {
   if (e.target.closest('input, select, button, textarea, label')) return;
   const be = e.target.closest('.block');
   if (!be) return;
-  const fromPalette = !!be.closest('#palette');
-  if (!fromPalette && !be.closest('#workspace')) return;
+  const hit = surfaceOf(be);
+  if (!hit) return;
   e.preventDefault();
-  press = { el: be, block: be._block, x: e.clientX, y: e.clientY, fromPalette, rect: be.getBoundingClientRect() };
+  press = {
+    el: be, block: be._block, x: e.clientX, y: e.clientY, rect: be.getBoundingClientRect(),
+    fromPalette: hit.fromPalette, surface: hit.surface,
+  };
 });
 
 window.addEventListener('pointermove', e => {
@@ -676,9 +747,12 @@ window.addEventListener('pointermove', e => {
 });
 
 window.addEventListener('pointerup', e => {
-  if (drag) endDrag(e);
-  else if (press) clickBlock(press);
-  press = null;
+  try {
+    if (drag) endDrag(e);
+    else if (press) clickBlock(press);
+  } finally {
+    press = null;
+  }
 });
 
 window.addEventListener('pointercancel', () => {
@@ -688,32 +762,35 @@ window.addEventListener('pointercancel', () => {
 
 function startDrag() {
   const p = press;
+  const sf = p.surface;
+  const scripts = sf.scripts;
   let blocks, origin = null;
-  const sprite = currentSprite();
   if (p.fromPalette) {
     blocks = [clone(p.block)];
   } else {
-    const loc = locateInSprite(sprite, p.block);
+    const loc = locateInScripts(scripts, p.block);
     if (!loc) { press = null; return; }
     if (loc.owner) {
       loc.owner.inputs[loc.input] = defaultInput(SPECS[loc.owner.type], loc.input);
       blocks = [p.block];
       origin = { kind: 'slot', owner: loc.owner, input: loc.input };
     } else if (loc.arr === loc.script.blocks && loc.index === 0) {
-      const pos = sprite.scripts.indexOf(loc.script);
-      sprite.scripts.splice(pos, 1);
+      const pos = scripts.indexOf(loc.script);
+      scripts.splice(pos, 1);
       blocks = loc.script.blocks;
       origin = { kind: 'script', script: loc.script, pos };
     } else {
       blocks = loc.arr.splice(loc.index);
       origin = { kind: 'arr', arr: loc.arr, index: loc.index };
     }
-    renderWorkspace();
+    sf.render();
   }
   drag = {
-    blocks, origin, sprite,
-    shape: SPECS[blocks[0].type].shape,
-    cap: !!SPECS[blocks[blocks.length - 1].type].cap,
+    blocks, origin, scripts,
+    surface: sf,
+    sprite: currentSprite(),
+    shape: specOf(blocks[0].type).shape,
+    cap: !!specOf(blocks[blocks.length - 1].type).cap,
     offX: p.x - p.rect.left,
     offY: p.y - p.rect.top,
     target: null,
@@ -731,13 +808,18 @@ function moveDrag(e) {
 }
 
 function findTarget(px, py) {
-  if (inRect(px, py, paletteEl.getBoundingClientRect()) || inRect(px, py, categoriesEl.getBoundingClientRect())) {
-    return { type: 'delete' };
+  const sf = drag.surface;
+  if (sf.deleteAreas.some(a => inRect(px, py, a.getBoundingClientRect()))) {
+    // The block coder's "define" hat can be moved but never thrown away.
+    return drag.blocks[0].type === 'ext_define' ? { type: 'none' } : { type: 'delete' };
   }
-  const under = document.elementFromPoint(px, py);
-  const tile = under && under.closest('.sprite-tile');
-  if (tile && tile._sprite && tile._sprite !== drag.sprite) return { type: 'copy', sprite: tile._sprite, el: tile };
-  if (!inRect(px, py, wsEl.getBoundingClientRect())) return { type: 'none' };
+  if (sf.copyToSprites) {
+    const under = document.elementFromPoint(px, py);
+    const tile = under && under.closest('.sprite-tile');
+    if (tile && tile._sprite && tile._sprite !== drag.sprite) return { type: 'copy', sprite: tile._sprite, el: tile };
+  }
+  if (!inRect(px, py, sf.ws.getBoundingClientRect())) return { type: 'none' };
+  const canvasEl = sf.canvas;
 
   const stackEl = dragLayer.firstChild;
   const sr = stackEl.getBoundingClientRect();
@@ -745,7 +827,7 @@ function findTarget(px, py) {
 
   if (drag.shape === 'reporter' || drag.shape === 'boolean') {
     let best = null, bd = 40;
-    for (const slot of wsCanvas.querySelectorAll('.drop-slot')) {
+    for (const slot of canvasEl.querySelectorAll('.drop-slot')) {
       if (drag.shape === 'reporter' && slot._kind === 'bool') continue;
       const r = slot.getBoundingClientRect();
       const d = Math.hypot(r.left - dr.left, (r.top + r.height / 2) - (dr.top + dr.height / 2));
@@ -760,7 +842,7 @@ function findTarget(px, py) {
       const d = Math.hypot(x - dr.left, y - dr.top);
       if (d < bd) { bd = d; best = { type: 'insert', arr, index, x, lineY: lineY ?? y }; }
     };
-    for (const st of wsCanvas.querySelectorAll('.stack')) {
+    for (const st of canvasEl.querySelectorAll('.stack')) {
       const arr = st._arr;
       const firstShape = arr[0] && SPECS[arr[0].type] ? SPECS[arr[0].type].shape : null;
       if (st._top && (firstShape === 'reporter' || firstShape === 'boolean')) continue;
@@ -804,7 +886,7 @@ function restoreOrigin() {
   const o = drag.origin;
   if (!o) return;
   if (o.kind === 'slot') o.owner.inputs[o.input] = drag.blocks[0];
-  else if (o.kind === 'script') drag.sprite.scripts.splice(o.pos, 0, o.script);
+  else if (o.kind === 'script') drag.scripts.splice(o.pos, 0, o.script);
   else if (o.kind === 'arr') o.arr.splice(o.index, 0, ...drag.blocks);
 }
 
@@ -820,10 +902,17 @@ function endDrag(e) {
       t.arr.splice(t.index, 0, ...drag.blocks);
       break;
     case 'top': {
-      const wr = wsEl.getBoundingClientRect();
-      const x = e.clientX - drag.offX - wr.left + wsEl.scrollLeft;
-      const y = e.clientY - drag.offY - wr.top + wsEl.scrollTop;
-      drag.sprite.scripts.push({ x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)), blocks: drag.blocks });
+      const ws = drag.surface.ws;
+      const wr = ws.getBoundingClientRect();
+      const x = e.clientX - drag.offX - wr.left + ws.scrollLeft;
+      const y = e.clientY - drag.offY - wr.top + ws.scrollTop;
+      // Moving a whole script keeps the same script object, so a running script (and a
+      // hat's last state) stays attached to it instead of starting a second copy.
+      const o = drag.origin;
+      const script = o && o.kind === 'script' && o.script.blocks === drag.blocks ? o.script : { blocks: drag.blocks };
+      script.x = Math.max(0, Math.round(x));
+      script.y = Math.max(0, Math.round(y));
+      drag.scripts.push(script);
       break;
     }
     case 'copy': {
@@ -835,9 +924,10 @@ function endDrag(e) {
     default:
       restoreOrigin();
   }
+  const sf = drag.surface;
   finishDrag();
-  renderWorkspace();
-  save();
+  sf.render();
+  sf.changed();
 }
 
 function finishDrag() {
@@ -850,10 +940,11 @@ function finishDrag() {
 
 // Clicking (without dragging) runs a script, or reports a reporter's value.
 function clickBlock(p) {
+  if (p.surface.click) { p.surface.click(p); return; }
   const sprite = currentSprite();
   if (p.fromPalette) {
     const b = clone(p.block);
-    const shape = SPECS[b.type].shape;
+    const shape = specOf(b.type).shape;
     if (shape === 'reporter' || shape === 'boolean') report(sprite, b, p.el);
     else startThread(sprite, [b], null);
     return;
@@ -861,7 +952,7 @@ function clickBlock(p) {
   const loc = locateInSprite(sprite, p.block);
   if (!loc) return;
   const top = loc.script.blocks[0];
-  const shape = SPECS[top.type].shape;
+  const shape = specOf(top.type).shape;
   if (shape === 'reporter' || shape === 'boolean') {
     report(sprite, top, p.el.closest('.script').querySelector('.block'));
     return;
@@ -911,48 +1002,51 @@ function showContextMenu(x, y, items) {
   ctxMenu.style.top = Math.min(y, innerHeight - mr.height - 4) + 'px';
 }
 
-wsEl.addEventListener('contextmenu', e => {
-  e.preventDefault();
-  const be = e.target.closest('.block');
-  if (!be) {
-    showContextMenu(e.clientX, e.clientY, [['Clean up blocks', cleanUp]]);
-    return;
-  }
-  const b = be._block;
-  showContextMenu(e.clientX, e.clientY, [
-    ['Duplicate', () => duplicateBlock(b, be)],
-    ['Delete Block', () => deleteBlock(b)],
-  ]);
-});
+function attachWorkspaceMenu(sf) {
+  sf.ws.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const be = e.target.closest('.block');
+    if (!be) {
+      if (sf.cleanUp) showContextMenu(e.clientX, e.clientY, [['Clean up blocks', sf.cleanUp]]);
+      return;
+    }
+    const b = be._block;
+    if (b.type === 'ext_define') return;
+    showContextMenu(e.clientX, e.clientY, [
+      ['Duplicate', () => duplicateBlock(sf, b, be)],
+      ['Delete Block', () => deleteBlock(sf, b)],
+    ]);
+  });
+}
+attachWorkspaceMenu(mainSurface);
 
-function duplicateBlock(b, be) {
-  const sprite = currentSprite();
-  const loc = locateInSprite(sprite, b);
+function duplicateBlock(sf, b, be) {
+  const loc = locateInScripts(sf.scripts, b);
   if (!loc) return;
   const blocks = loc.owner ? [clone(b)] : clone(loc.arr.slice(loc.index));
-  const wr = wsEl.getBoundingClientRect();
+  const wr = sf.ws.getBoundingClientRect();
   const r = be.getBoundingClientRect();
-  sprite.scripts.push({
-    x: Math.round(r.left - wr.left + wsEl.scrollLeft + 24),
-    y: Math.round(r.top - wr.top + wsEl.scrollTop + 24),
+  sf.scripts.push({
+    x: Math.round(r.left - wr.left + sf.ws.scrollLeft + 24),
+    y: Math.round(r.top - wr.top + sf.ws.scrollTop + 24),
     blocks,
   });
-  renderWorkspace();
-  save();
+  sf.render();
+  sf.changed();
 }
 
-function deleteBlock(b) {
-  const sprite = currentSprite();
-  const loc = locateInSprite(sprite, b);
+function deleteBlock(sf, b) {
+  const scripts = sf.scripts;
+  const loc = locateInScripts(scripts, b);
   if (!loc) return;
   if (loc.owner) {
     loc.owner.inputs[loc.input] = defaultInput(SPECS[loc.owner.type], loc.input);
   } else {
     loc.arr.splice(loc.index, 1);
-    if (loc.script.blocks.length === 0) sprite.scripts.splice(sprite.scripts.indexOf(loc.script), 1);
+    if (loc.script.blocks.length === 0) scripts.splice(scripts.indexOf(loc.script), 1);
   }
-  renderWorkspace();
-  save();
+  sf.render();
+  sf.changed();
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +1197,7 @@ class Thread {
     this.key = key;
     this.stopped = false;
     this.finished = false;
+    this.extFrames = []; // inputs of block-coded extension blocks being run, innermost last
   }
 }
 const threads = new Map(); // key (script object or a fresh token) -> Thread
@@ -1131,6 +1226,7 @@ function stopAll() {
   stopSounds();
   for (const s of project.sprites) s._bubble = null;
   if (askState) { askState.cancelled = true; }
+  stopExtensionHats();
 }
 
 function fireHats(match, restart = true) {
@@ -1364,6 +1460,12 @@ async function exec(t, b) {
       s.penColor = hslToHex(h + num(await I(0)) * 3.6, sat || 100, l || 50);
       break;
     }
+    // Extension block coder
+    case 'ext_report':
+    case 'ext_stop':
+      if (!t.extFrames.length) break; // only meaningful inside a block-coded extension block
+      throw { extReport: true, value: b.type === 'ext_report' ? await I(0) : '' };
+
     case 'pen_size': s.penSize = clamp(num(await I(0)), 1, 200); break;
     case 'change_pen_size': s.penSize = clamp(s.penSize + num(await I(0)), 1, 200); break;
 
@@ -1443,6 +1545,10 @@ async function evalReporter(t, b) {
       return 0;
     }
     case 'var_get': return getVarObj(b.inputs[0]).value;
+    case 'ext_arg': {
+      const f = t.extFrames[t.extFrames.length - 1];
+      return f && Object.prototype.hasOwnProperty.call(f.args, b.inputs[0]) ? f.args[b.inputs[0]] : '';
+    }
   }
   if (SPECS[b.type] && SPECS[b.type].ext) return runExtBlock(t, b);
   return '';
@@ -1657,7 +1763,8 @@ function isTyping(e) {
   return e.target.closest && e.target.closest('input, textarea, select, [contenteditable]');
 }
 window.addEventListener('keydown', e => {
-  if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+  // Keys pressed while a dialog is open belong to the dialog, not the stage.
+  if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey || modalOpen()) return;
   const k = keyName(e);
   if (!k) return;
   if (k === 'space' || k.endsWith('arrow')) e.preventDefault();
@@ -1780,6 +1887,7 @@ function loadProject(p) {
   renderWorkspace();
   renderSprites();
   refreshSpriteInfo(true);
+  updateActiveCategory();
   save();
 }
 
