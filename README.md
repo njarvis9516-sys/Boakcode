@@ -24,6 +24,21 @@ python3 -m http.server 8000   # then visit http://localhost:8000
   - Drop a script onto another sprite's tile to copy it to that sprite.
 - **Save**: your work is saved in the browser automatically. **Save** downloads a `.boak.json` file, and **Load** opens one.
 
+## Extensions
+
+Click **🧩 Extensions** at the bottom of the category list to:
+
+- **Add from the library**: Text Tools, Math Plus, Date & Time and Fun Effects.
+- **Make your own** with the extension maker:
+  1. Pick a name and colour.
+  2. Add blocks. Each block is a *command* (stack block), *reporter* (round) or *boolean* (pointy).
+  3. Write each block's text, using `[NAME]` for inputs, e.g. `greet [NAME] [TIMES] times`. Inputs can be numbers, text, booleans or drop-down menus.
+  4. Write the JavaScript the block runs. The editor checks for syntax errors as you type, and **Try it** runs the block on the current sprite. **What can my code use?** lists the helpers available, such as `util.wait`, `util.say`, `util.moveTo` and `util.getVar`.
+- **Edit** any extension with the **Edit** button next to its name in the palette, or from the Extensions window.
+- **Share**: **Export** downloads a `.boakext.json` file, and **Load extension file…** imports one.
+
+Extensions are saved inside the project, so they travel with saved project files. Extension code is ordinary JavaScript running in the page, so Boakcode asks you to confirm before loading extensions from files. Only load extensions from people you trust.
+
 ### Block categories
 
 | Category  | Highlights |
@@ -42,6 +57,7 @@ python3 -m http.server 8000   # then visit http://localhost:8000
 
 - `index.html` is the page layout.
 - `style.css` holds the Scratch-style look, including block shapes per category.
+- `extensions.js` has the extension system: the library, the gallery, the maker/editor, and how extension blocks are registered and run.
 - `app.js` contains:
   - the block definitions (`SPECS`)
   - DOM rendering of blocks
