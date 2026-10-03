@@ -28,10 +28,10 @@ python3 -m http.server 8000   # then visit http://localhost:8000
 
 Click **🧩 Extensions** at the bottom of the category list to:
 
-- **Add from the library**: Text Tools, Math Plus, Date & Time and Fun Effects.
+- **Add from the library**: Text Tools, Math Plus, Date & Time (including a "when timer is over" hat) and Fun Effects (including a "when mouse is closer than" hat).
 - **Make your own** with the extension maker:
   1. Pick a name and colour.
-  2. Add blocks. Each block is a *command* (stack block), *reporter* (round) or *boolean* (pointy).
+  2. Add blocks. Each block is a *command* (stack block), *reporter* (round), *boolean* (pointy) or *hat* (a "when…" block). A hat's code returns true or false. Boakcode checks it every frame and starts the scripts underneath when it changes from false to true.
   3. Write each block's text, using `[NAME]` for inputs, e.g. `greet [NAME] [TIMES] times`. Inputs can be numbers, text, booleans or drop-down menus.
   4. Write the JavaScript the block runs. The editor checks for syntax errors as you type, and **Try it** runs the block on the current sprite. **What can my code use?** lists the helpers available, such as `util.wait`, `util.say`, `util.moveTo` and `util.getVar`.
 - **Edit** any extension with the **Edit** button next to its name in the palette, or from the Extensions window.

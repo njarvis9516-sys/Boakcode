@@ -1369,7 +1369,7 @@ async function exec(t, b) {
 
     default:
       // Extension blocks run their own code; hats are markers and loose reporters do nothing.
-      if (SPECS[b.type] && SPECS[b.type].ext) await runExtBlock(t, b);
+      if (SPECS[b.type] && SPECS[b.type].ext && SPECS[b.type].shape !== 'hat') await runExtBlock(t, b);
       break;
   }
 }
@@ -1588,6 +1588,7 @@ function render() {
   if (paletteDirty && !drag) renderPalette();
   if (uiDirty) { renderSprites(); uiDirty = false; }
   if (++frameCount % 6 === 0) refreshSpriteInfo();
+  pollExtensionHats();
   requestAnimationFrame(render);
 }
 

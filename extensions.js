@@ -4,7 +4,9 @@
  *
  * An extension is a new block category whose blocks run JavaScript:
  *   { id, name, color, blocks: [{ opcode, type, text, args, code }] }
- * - type: "command" (stack block), "reporter" (round, returns a value) or "boolean" (hexagon).
+ * - type: "command" (stack block), "reporter" (round, returns a value), "boolean" (hexagon)
+ *   or "hat" (a "when…" block whose code returns true/false; its scripts start when that
+ *   changes from false to true — checked every frame, like Scratch's "when timer > 10").
  * - text: the block label; [NAME] marks an input, e.g. "repeat [TEXT] [TIMES] times".
  * - args: one entry per input name: { name, type: number|text|boolean|menu, default, options }.
  * - code: the body of an async function (args, sprite, util) — see EXT_API_HELP.
@@ -17,9 +19,9 @@
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const EXT_ARG_RE = /\[([A-Za-z_][A-Za-z0-9_]*)\]/g;
-const EXT_BLOCK_TYPES = ['command', 'reporter', 'boolean'];
+const EXT_BLOCK_TYPES = ['command', 'reporter', 'boolean', 'hat'];
 const EXT_ARG_TYPES = ['number', 'text', 'boolean', 'menu'];
-const EXT_SHAPES = { command: 'stack', reporter: 'reporter', boolean: 'boolean' };
+const EXT_SHAPES = { command: 'stack', reporter: 'reporter', boolean: 'boolean', hat: 'hat' };
 const EXT_COLORS = ['#e05a9c', '#0fa3b1', '#7a5af8', '#f26b38', '#2f9e44', '#3b5bdb', '#c2255c', '#5c7cfa'];
 
 const EXT_API_HELP = `Your code is the body of an async function. It can use:
@@ -48,7 +50,11 @@ util.timer()             seconds since the green flag
 util.sprites             every sprite in the project
 util.stage               { width: 480, height: 360 }
 
-Reporter and boolean blocks "return" their value.`;
+Reporter and boolean blocks "return" their value.
+
+Hat ("when…") blocks return true or false. Boakcode checks them every
+frame and starts the scripts underneath when the answer changes from
+false to true. Keep hat code quick — don't use util.wait in it.`;
 
 // Ready-made extensions anyone can add from the gallery.
 const EXT_LIBRARY = [
@@ -121,6 +127,9 @@ const EXT_LIBRARY = [
         ].join('\n') },
       { opcode: 'days2000', type: 'reporter', text: 'days since 2000', args: [],
         code: 'return Math.floor((Date.now() - Date.UTC(2000, 0, 1)) / 86400000);' },
+      { opcode: 'whentimer', type: 'hat', text: 'when timer is over [SECS] seconds',
+        args: [{ name: 'SECS', type: 'number', default: 5 }],
+        code: 'return util.timer() > args.SECS;' },
       { opcode: 'weekend', type: 'boolean', text: 'is it the weekend?', args: [],
         code: 'const day = new Date().getDay();\nreturn day === 0 || day === 6;' },
     ],
@@ -160,6 +169,9 @@ const EXT_LIBRARY = [
           '  await util.frame();',
           '}',
         ].join('\n') },
+      { opcode: 'whennear', type: 'hat', text: 'when mouse is closer than [DIST]',
+        args: [{ name: 'DIST', type: 'number', default: 60 }],
+        code: 'return Math.hypot(util.mouse.x - sprite.x, util.mouse.y - sprite.y) < args.DIST;' },
       { opcode: 'emoji', type: 'command', text: 'switch to a random animal', args: [],
         code: 'const animals = [\'🐱\', \'🐶\', \'🐸\', \'🦊\', \'🐼\', \'🐵\', \'🐢\', \'🐙\'];\nutil.setCostume(animals[util.random(0, animals.length - 1)]);' },
     ],
@@ -333,6 +345,47 @@ async function runExtBlock(t, b) {
     extError(x, err && err.message ? err.message : String(err));
     return '';
   }
+}
+
+// Extension hats are edge-triggered: each frame we re-check every script that starts
+// with one, and start the script when its condition turns from false to true.
+const hatLastValue = new WeakMap(); // script -> condition result last frame
+let hatPolling = false;
+
+async function pollExtensionHats() {
+  if (hatPolling || !project.extensions.length) return;
+  hatPolling = true;
+  try {
+    for (const sprite of project.sprites) {
+      for (const script of sprite.scripts) {
+        const hat = script.blocks[0];
+        const spec = hat && SPECS[hat.type];
+        if (!spec || !spec.ext || spec.shape !== 'hat') continue;
+        let now = false;
+        if (spec.ext.error) {
+          reportOnce(spec.ext, spec.ext.error);
+        } else {
+          const t = new Thread(sprite, null);
+          try {
+            now = bool(await spec.ext.fn(await extArgs(t, hat, spec.ext.argDefs), sprite, makeUtil(t)));
+          } catch (err) {
+            reportOnce(spec.ext, err && err.message ? err.message : String(err));
+          }
+        }
+        if (now && !hatLastValue.get(script)) startThread(sprite, script.blocks.slice(1), script, false);
+        hatLastValue.set(script, now);
+      }
+    }
+  } finally {
+    hatPolling = false;
+  }
+}
+
+// A broken hat would otherwise report the same error every frame.
+function reportOnce(x, message) {
+  if (x.reported) return;
+  x.reported = true;
+  extError(x, message);
 }
 
 function extError(x, message) {
@@ -533,6 +586,7 @@ const CODE_TEMPLATES = {
   command: '// Runs when the block runs. Example:\nutil.say(\'Hello from my block!\');\nawait util.wait(1);\nutil.say(\'\');',
   reporter: '// Return the value this block reports. Example:\nreturn 42;',
   boolean: '// Return true or false. Example:\nreturn sprite.x > 0;',
+  hat: '// Checked every frame. The scripts under this block start\n// when this changes from false to true. Example:\nreturn util.mouse.down;',
 };
 
 function newExtensionBlock(type = 'command') {
@@ -650,6 +704,7 @@ function openExtensionEditor(existing, { isNew = false } = {}) {
       ['command', 'Command', 'a stack block that does something'],
       ['reporter', 'Reporter', 'a round block that reports a value'],
       ['boolean', 'Boolean', 'a pointy block that reports true/false'],
+      ['hat', 'Hat', 'a "when…" block that starts scripts'],
     ]) {
       const b = el('button', 'ed-type' + (blk.type === type ? ' selected' : ''));
       b.type = 'button';
@@ -775,7 +830,9 @@ function openExtensionEditor(existing, { isNew = false } = {}) {
         const args = await extArgs(t, b, spec.ext.argDefs);
         const value = await spec.ext.fn(args, t.sprite, makeUtil(t));
         result.className = 'ed-result ok';
-        result.textContent = blk.type === 'command' ? '✓ Ran without errors' : '✓ Reported: ' + fmt(blk.type === 'boolean' ? bool(value) : value ?? '');
+        result.textContent = blk.type === 'command' ? '✓ Ran without errors'
+          : blk.type === 'hat' ? '✓ Right now the condition is ' + bool(value) + (bool(value) ? ' — scripts would start' : '')
+          : '✓ Reported: ' + fmt(blk.type === 'boolean' ? bool(value) : value ?? '');
       } catch (err) {
         result.className = 'ed-result err';
         result.textContent = '✗ ' + (err && err.message ? err.message : String(err));

@@ -744,7 +744,7 @@ body.dragging, body.dragging * { cursor: grabbing !important; }
   background-image: radial-gradient(#d8deea 1px, transparent 1px);
   background-size: 18px 18px;
 }
-.ed-types { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.ed-types { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .ed-type {
   display: flex;
   flex-direction: column;
@@ -797,5 +797,5 @@ textarea.code {
 
 @media (max-width: 760px) {
   .ext-editor { grid-template-columns: minmax(0, 1fr); }
-  .ed-types { grid-template-columns: 1fr; }
+  .ed-types { grid-template-columns: repeat(2, 1fr); }
 }
