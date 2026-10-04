@@ -476,11 +476,22 @@ const extToBool = v => (v == null ? false : bool(toPrimitive(v)));
 
 function makeUtil(t) {
   const s = t.sprite;
-  // Once the block is stopped (Stop, Cancel, a new project…), anything it tries to do ends it.
-  const live = fn => (...a) => { if (t.stopped) throw STOP; return fn(...a); };
+  // Once the block is stopped (Stop, Cancel, a new project…), anything it tries to do ends it —
+  // except clean-up code that runs as util.wait/util.frame hands it the stop (a finally block
+  // putting the sprite back), which gets until the end of that moment to finish.
+  let cleaningUp = false;
+  const handOver = async p => {
+    try {
+      return await p;
+    } catch (err) {
+      if (err === STOP) { cleaningUp = true; setTimeout(() => { cleaningUp = false; }, 0); }
+      throw err;
+    }
+  };
+  const live = fn => (...a) => { if (t.stopped && !cleaningUp) throw STOP; return fn(...a); };
   return {
-    wait: secs => waitSecs(t, num(secs)),
-    frame: () => frame(t),
+    wait: secs => handOver(waitSecs(t, num(secs))),
+    frame: () => handOver(frame(t)),
     moveTo: live((x, y) => moveTo(s, num(x), num(y))),
     turn: live(d => setDir(s, s.dir + num(d))),
     pointIn: live(d => setDir(s, num(d))),

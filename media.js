@@ -609,6 +609,14 @@ for (const b of document.querySelectorAll('#tabs [data-tab]')) {
   });
 }
 
+// After a mouse click on a button or list item in the costume/sound panels, take focus off it,
+// so Space and the arrow keys go back to the stage. (Keyboard use keeps its focus.)
+document.addEventListener('click', e => {
+  if (!e.detail || !e.target.closest) return;
+  const ctl = e.target.closest('.media-panel button, .media-panel .media-item');
+  if (ctl && document.activeElement === ctl) ctl.blur();
+}, true); // capture: some of these buttons stop their click from bubbling
+
 function renderActiveMediaPanel() {
   mediaPanelDirty = false;
   if (currentTab === 'costumes') renderCostumesPanel();
@@ -1390,25 +1398,49 @@ function renderSoundMaker(editor, s, snd) {
       if (a) scheduleInstrumentNote(a, snd.instrument, SOUND_SCALE[row], a.currentTime + 0.01, stepSeconds(snd), 0.7);
     }
   };
+  // With touch, a sideways swipe scrolls the grid, so nothing changes until the finger has
+  // either lifted (a tap) or moved up/down (painting). A swipe that turns into a scroll is ignored.
+  let pendingTouch = null;
+  const startPaint = cell => {
+    state.painting = { on: !has(Number(cell.dataset.step), Number(cell.dataset.row)) };
+    applyCell(cell);
+  };
   grid.addEventListener('pointerdown', e => {
     const cell = e.target.closest('.sm-cell');
     if (!cell || e.button !== 0) return;
     e.preventDefault();
-    state.painting = { on: !has(Number(cell.dataset.step), Number(cell.dataset.row)) };
-    applyCell(cell);
+    if (e.pointerType === 'touch') { pendingTouch = { cell, x: e.clientX, y: e.clientY, id: e.pointerId }; return; }
+    startPaint(cell);
   });
   grid.addEventListener('pointermove', e => {
+    if (pendingTouch && e.pointerId === pendingTouch.id) {
+      const dx = Math.abs(e.clientX - pendingTouch.x), dy = Math.abs(e.clientY - pendingTouch.y);
+      if (dx > 8 && dx >= dy) { pendingTouch = null; return; } // a sideways swipe: let it scroll
+      if (dy > 8 && dy > dx) { const cell = pendingTouch.cell; pendingTouch = null; startPaint(cell); }
+      else return;
+    }
     if (!state.painting) return;
     const under = document.elementFromPoint(e.clientX, e.clientY);
     const cell = under && under.closest('.sm-cell');
     if (cell && grid.contains(cell)) applyCell(cell);
   });
+  grid.addEventListener('pointerup', e => {
+    if (pendingTouch && e.pointerId === pendingTouch.id) { // a tap
+      const cell = pendingTouch.cell;
+      pendingTouch = null;
+      startPaint(cell);
+      state.endPaint();
+    }
+  });
+  grid.addEventListener('pointercancel', () => { pendingTouch = null; });
   const endPaint = () => { if (state.painting) { state.painting = false; touched(); } };
   state.endPaint = endPaint;
   // Keyboard: Enter/Space on a focused square toggles it.
   grid.addEventListener('click', e => {
     const cell = e.target.closest('.sm-cell');
-    if (!cell || e.detail !== 0) return; // mouse clicks were handled on pointerdown
+    // Pointer clicks (mouse, pen, touch taps) were handled by the pointer events above; only a
+    // keyboard Enter/Space click is left. (Touch taps can report detail 0, so check pointerType too.)
+    if (!cell || e.detail !== 0 || e.pointerType) return;
     state.painting = { on: !has(Number(cell.dataset.step), Number(cell.dataset.row)) };
     applyCell(cell);
     endPaint();
