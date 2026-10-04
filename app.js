@@ -29,7 +29,7 @@ function num(v) {
 }
 function bool(v) {
   if (typeof v === 'boolean') return v;
-  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'number') return v !== 0 && !Number.isNaN(v);
   const s = String(v).toLowerCase();
   return s !== '' && s !== '0' && s !== 'false';
 }
@@ -308,8 +308,14 @@ function normalizeSprite(raw) {
   const { costume: legacyEmoji, costumes, costumeIndex, sounds, effects, scripts, ...rest } =
     raw && typeof raw === 'object' ? raw : {};
   const s = Object.assign(makeSprite('Sprite', '🐱'), rest);
-  s.costumes = sanitizeCostumes(costumes, typeof legacyEmoji === 'string' ? legacyEmoji : '');
+  const migrated = !Array.isArray(costumes);
+  const legacy = migrated ? [typeof legacyEmoji === 'string' ? legacyEmoji : '', ...legacyCostumeTexts(scripts)] : [];
+  s.costumes = sanitizeCostumes(costumes, legacy);
+  // Before costume lists, any text could be a costume; such sprites keep working that way.
+  if (migrated || (raw && raw.freeTextCostumes === true)) s.freeTextCostumes = true;
+  else delete s.freeTextCostumes;
   s.costumeIndex = clamp(Math.round(num(costumeIndex)), 0, s.costumes.length - 1);
+  preloadCostumes(s);
   s.sounds = sanitizeSounds(sounds);
   s.effects = Object.assign({ color: 0, ghost: 0, brightness: 0 }, effects);
   s.scripts = Array.isArray(scripts) ? scripts.filter(sc => sc && Array.isArray(sc.blocks) && sc.blocks.length) : [];
@@ -365,17 +371,35 @@ function save() {
   saveTimer = setTimeout(() => {
     try {
       localStorage.setItem(STORAGE_KEY, serialize());
+      if (saveFailed) setSaveFailed(false);
     } catch (err) {
-      warnStorageFull(err);
+      if (isQuotaError(err) && !saveFailed) setSaveFailed(true);
     }
   }, 250);
 }
-// Pictures and sounds can make a project bigger than the browser will store; say so once.
-let storageWarned = false;
-function warnStorageFull(err) {
-  if (storageWarned || !err || (err.name !== 'QuotaExceededError' && err.code !== 22)) return;
-  storageWarned = true;
-  toast("This project is too big to keep in the browser. Use Save to download it so you don't lose your work.");
+// Pictures and sounds can make a project bigger than the browser will store. While that's
+// the case a banner stays up (the browser's copy is out of date), and leaving the page asks first.
+let saveFailed = false;
+const isQuotaError = err => !!err && (err.name === 'QuotaExceededError' || err.code === 22);
+function setSaveFailed(failed) {
+  saveFailed = failed;
+  let bar = document.getElementById('save-warning');
+  if (!failed) { if (bar) bar.hidden = true; return; }
+  if (!bar) {
+    bar = el('div');
+    bar.id = 'save-warning';
+    bar.setAttribute('role', 'alert');
+    const btn = el('button', null, 'Save to computer');
+    btn.type = 'button';
+    btn.addEventListener('click', () => $('#btn-save').click());
+    const close = el('button', 'close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Hide this message');
+    close.addEventListener('click', () => { bar.hidden = true; });
+    bar.append(el('span', null, "This project is too big to keep in the browser, so your latest changes aren't saved here. "), btn, close);
+    document.body.appendChild(bar);
+  }
+  bar.hidden = false;
 }
 function loadInitial() {
   try {
@@ -778,6 +802,9 @@ let hoverEl = null;
 function inRect(x, y, r) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
 
 document.addEventListener('pointerdown', e => {
+  const ae = document.activeElement;
+  if (ae && ae !== document.body && ae.closest && ae.closest('#tabs, .media-panel') &&
+      !(e.target.closest && e.target.closest('#tabs, .media-panel'))) ae.blur();
   hideContextMenu();
   clearReport();
   audioUnlock();
@@ -846,6 +873,7 @@ function startDrag() {
   drag = {
     blocks, origin, scripts,
     surface: sf,
+    unknown: !SPECS[blocks[0].type],
     sprite: currentSprite(),
     shape: specOf(blocks[0].type).shape,
     cap: !!specOf(blocks[blocks.length - 1].type).cap,
@@ -877,6 +905,8 @@ function findTarget(px, py) {
     if (tile && tile._sprite && tile._sprite !== drag.sprite) return { type: 'copy', sprite: tile._sprite, el: tile };
   }
   if (!inRect(px, py, sf.ws.getBoundingClientRect())) return { type: 'none' };
+  // A block whose extension was removed has no known shape, so it can't snap anywhere.
+  if (drag.unknown) return { type: 'top' };
   const canvasEl = sf.canvas;
 
   const stackEl = dragLayer.firstChild;
@@ -906,13 +936,13 @@ function findTarget(px, py) {
       if (st._top && (firstShape === 'reporter' || firstShape === 'boolean')) continue;
       const r = st.getBoundingClientRect();
       if (st._top) {
-        if (firstShape !== 'hat' && !drag.cap) consider(r.left, r.top - sr.height, arr, 0, r.top);
+        if (firstShape && firstShape !== 'hat' && !drag.cap) consider(r.left, r.top - sr.height, arr, 0, r.top);
       } else if (!drag.cap || arr.length === 0) {
         consider(r.left, r.top, arr, 0);
       }
       [...st.children].forEach((child, i) => {
         const spec = SPECS[arr[i].type];
-        if (spec && spec.cap) return;
+        if (!spec || spec.cap) return; // nothing goes under an unknown block or a cap
         if (drag.cap && i !== arr.length - 1) return;
         const cr = child.getBoundingClientRect();
         consider(cr.left, cr.bottom, arr, i + 1);
@@ -1126,10 +1156,64 @@ let timerStart = performance.now();
 let answer = '';
 let uiDirty = true;
 
-function spriteRadius(s) {
-  const c = currentCostume(s);
-  if (c && c.kind === 'image') return Math.max(4, Math.max(c.w, c.h) / 2 * s.size / 100);
-  return s.size * 0.24;
+// ---- Where a sprite really is, for clicks, edges and speech bubbles. A painted costume can
+// sit anywhere around the sprite's position (its centre is the + in the paint editor).
+
+// How drawSprite turns the sprite: an angle (canvas radians) or a left-right flip.
+function spriteTurn(s) {
+  if (s.rotationStyle === 'all around') return { a: rad(s.dir - 90), flip: false };
+  return { a: 0, flip: s.rotationStyle === 'left-right' && s.dir < 0 };
+}
+// How far the turned sprite reaches from its position, in stage units: { left, right, bottom, top }.
+// Emoji count as circles; painted costumes use the outline (convex hull) of their pixels, so a
+// turned round picture reaches the edge exactly when its paint does.
+function spriteBounds(s) {
+  const c = displayCostume(s);
+  if (c.kind !== 'image') {
+    const r = s.size * 0.24;
+    return { left: -r, right: r, bottom: -r, top: r };
+  }
+  const k = s.size / 100;
+  const pts = costumeHull(c);
+  if (!pts.length) return { left: 0, right: 0, bottom: 0, top: 0 };
+  const { a, flip } = spriteTurn(s);
+  const cos = Math.cos(a), sin = Math.sin(a);
+  let left = Infinity, right = -Infinity, bottom = Infinity, top = -Infinity;
+  for (const [px, py] of pts) {
+    const y0 = (py - c.cy) * k;
+    const x = flip ? -(px - c.cx) * k : (px - c.cx) * k;
+    const cx = x * cos - y0 * sin, cy = x * sin + y0 * cos;
+    left = Math.min(left, cx);
+    right = Math.max(right, cx);
+    bottom = Math.min(bottom, -cy); // stage y points up
+    top = Math.max(top, -cy);
+  }
+  return { left, right, bottom, top };
+}
+// Is the stage point (x, y) on the sprite? For painted costumes this checks the actual pixels.
+function spriteContains(s, x, y) {
+  if (!s.visible) return false;
+  const c = displayCostume(s);
+  const k = s.size / 100;
+  const dx = x - s.x, dy = s.y - y; // canvas space, relative to the sprite
+  const { a, flip } = spriteTurn(s);
+  let lx = dx * Math.cos(a) + dy * Math.sin(a);
+  const ly = -dx * Math.sin(a) + dy * Math.cos(a);
+  if (flip) lx = -lx;
+  if (c.kind !== 'image') return Math.hypot(lx, ly) <= s.size * 0.24;
+  if (!k) return false;
+  const px = lx / k + c.cx, py = ly / k + c.cy;
+  const slack = Math.max(1, Math.ceil(2 / k)); // a little leeway so thin lines are easy to click
+  if (px < -slack || py < -slack || px >= c.w + slack || py >= c.h + slack) return false;
+  const alpha = costumeAlpha(c);
+  if (!alpha) return px >= 0 && py >= 0 && px < c.w && py < c.h; // still loading: the box will do
+  const x0 = Math.floor(px), y0 = Math.floor(py);
+  for (let yy = Math.max(0, y0 - slack); yy <= Math.min(c.h - 1, y0 + slack); yy++) {
+    for (let xx = Math.max(0, x0 - slack); xx <= Math.min(c.w - 1, x0 + slack); xx++) {
+      if (alpha[yy * c.w + xx] > 16) return true;
+    }
+  }
+  return false;
 }
 const toCanvasX = x => STAGE_W / 2 + x;
 const toCanvasY = y => STAGE_H / 2 - y;
@@ -1153,23 +1237,26 @@ function setDir(s, d) {
   s.dir = d === -180 ? 180 : d;
 }
 function bounce(s) {
-  const r = spriteRadius(s);
+  let b = spriteBounds(s);
   const dx = Math.sin(rad(s.dir)), dy = Math.cos(rad(s.dir));
   let dir = s.dir;
-  if ((s.x + r > STAGE_W / 2 && dx > 0) || (s.x - r < -STAGE_W / 2 && dx < 0)) dir = -dir;
-  if ((s.y + r > STAGE_H / 2 && dy > 0) || (s.y - r < -STAGE_H / 2 && dy < 0)) dir = 180 - dir;
+  if ((s.x + b.right > STAGE_W / 2 && dx > 0) || (s.x + b.left < -STAGE_W / 2 && dx < 0)) dir = -dir;
+  if ((s.y + b.top > STAGE_H / 2 && dy > 0) || (s.y + b.bottom < -STAGE_H / 2 && dy < 0)) dir = 180 - dir;
   setDir(s, dir);
-  const mx = Math.max(0, STAGE_W / 2 - r), my = Math.max(0, STAGE_H / 2 - r);
-  moveTo(s, clamp(s.x, -mx, mx), clamp(s.y, -my, my));
+  b = spriteBounds(s); // turning can change how far it reaches
+  // Pull it back onto the stage; something bigger than the stage is centred instead.
+  const keepIn = (pos, lo, hi, min, max) => (max - min > hi - lo ? (lo + hi) / 2 - (min + max) / 2 : clamp(pos, lo - min, hi - max));
+  moveTo(s, keepIn(s.x, -STAGE_W / 2, STAGE_W / 2, b.left, b.right), keepIn(s.y, -STAGE_H / 2, STAGE_H / 2, b.bottom, b.top));
 }
 function touchingEdge(s) {
-  const r = spriteRadius(s);
-  return s.x - r <= -STAGE_W / 2 || s.x + r >= STAGE_W / 2 || s.y - r <= -STAGE_H / 2 || s.y + r >= STAGE_H / 2;
+  const b = spriteBounds(s);
+  return s.x + b.left <= -STAGE_W / 2 || s.x + b.right >= STAGE_W / 2 ||
+    s.y + b.bottom <= -STAGE_H / 2 || s.y + b.top >= STAGE_H / 2;
 }
 function hitSprite(x, y) {
   for (let i = project.sprites.length - 1; i >= 0; i--) {
     const s = project.sprites[i];
-    if (s.visible && Math.hypot(x - s.x, y - s.y) <= spriteRadius(s)) return s;
+    if (spriteContains(s, x, y)) return s;
   }
   return null;
 }
@@ -1196,7 +1283,9 @@ function track(node) {
   playing.add(node);
   node.onended = () => playing.delete(node);
 }
+let soundStopCount = 0; // lets sound previews that are still loading know Stop was pressed
 function stopSounds() {
+  soundStopCount++;
   for (const n of playing) { try { n.stop(); } catch { /* already stopped */ } }
   playing.clear();
 }
@@ -1518,7 +1607,11 @@ async function exec(t, b) {
       penCtx.clearRect(0, 0, penCanvas.width, penCanvas.height);
       penCtx.restore();
       break;
-    case 'stamp': drawSprite(penCtx, s); break;
+    case 'stamp':
+      await costumeReady(displayCostume(s)); // a picture that's still loading would stamp nothing
+      if (t.stopped) throw STOP;
+      drawSprite(penCtx, s);
+      break;
     case 'pen_down':
       s.penDown = true;
       penCtx.fillStyle = s.penColor;
@@ -1556,13 +1649,13 @@ async function evalReporter(t, b) {
     case 'x_pos': return Math.round(s.x * 1e6) / 1e6;
     case 'y_pos': return Math.round(s.y * 1e6) / 1e6;
     case 'direction': return s.dir;
-    case 'costume_name': return currentCostume(s).name;
+    case 'costume_name': return displayCostume(s).name;
     case 'costume_number': return s.costumeIndex + 1;
     case 'size': return Math.round(s.size);
     case 'volume': return s.volume;
 
     case 'touching_edge': return touchingEdge(s);
-    case 'touching_mouse': return s.visible && Math.hypot(mouse.x - s.x, mouse.y - s.y) <= spriteRadius(s);
+    case 'touching_mouse': return spriteContains(s, mouse.x, mouse.y);
     case 'key_pressed': {
       const k = String(await I(0));
       return k === 'any' ? keysDown.size > 0 : keysDown.has(k);
@@ -1644,7 +1737,7 @@ function drawSprite(c, s) {
   if (fx.brightness) filters.push(`brightness(${clamp(100 + fx.brightness, 0, 200)}%)`);
   c.filter = filters.length ? filters.join(' ') : 'none';
   c.globalAlpha = 1 - clamp(fx.ghost || 0, 0, 100) / 100;
-  const cos = currentCostume(s);
+  const cos = displayCostume(s);
   if (cos.kind === 'image') {
     const img = costumeImage(cos);
     const k = s.size / 100;
@@ -1691,12 +1784,14 @@ function drawBubble(s) {
   const lines = wrapText(ctx, b.text, 150);
   const w = Math.max(40, ...lines.map(l => ctx.measureText(l).width)) + 20;
   const h = lines.length * 16 + 14;
-  const r = spriteRadius(s);
-  const sx = toCanvasX(s.x), sy = toCanvasY(s.y);
-  let onLeft = sx + r * 0.6 + w > STAGE_W;
-  let bx = onLeft ? sx - r * 0.6 - w : sx + r * 0.6;
+  // Anchor the bubble to where the costume actually is (a painting can be off-centre).
+  const bb = spriteBounds(s);
+  const mid = toCanvasX(s.x) + (bb.left + bb.right) / 2, half = (bb.right - bb.left) / 2;
+  const topY = toCanvasY(s.y) - bb.top;
+  const onLeft = mid + half * 0.6 + w > STAGE_W;
+  let bx = onLeft ? mid - half * 0.6 - w : mid + half * 0.6;
   bx = clamp(bx, 2, STAGE_W - w - 2);
-  const by = clamp(sy - r - h - 12, 2, STAGE_H - h - 2);
+  const by = clamp(topY - h - 12, 2, STAGE_H - h - 2);
   ctx.fillStyle = '#fff';
   ctx.strokeStyle = '#c3c8d4';
   ctx.lineWidth = 1.5;
@@ -1846,6 +1941,10 @@ function isTyping(e) {
 window.addEventListener('keydown', e => {
   // Keys pressed while a dialog is open belong to the dialog, not the stage.
   if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey || modalOpen()) return;
+  if (e.defaultPrevented) return; // already used, e.g. Space choosing a costume in the list
+  // Space and arrows work the focused tab or costume/sound control instead of the stage.
+  const own = keyName(e);
+  if (e.target.closest && e.target.closest('#tabs, .media-panel') && (own === 'space' || (own && own.endsWith('arrow')))) return;
   const k = keyName(e);
   if (!k) return;
   if (k === 'space' || k.endsWith('arrow')) e.preventDefault();
@@ -1871,12 +1970,13 @@ const si = {
 };
 
 function selectSprite(s) {
+  const same = project.selected === s.id;
   project.selected = s.id;
   paletteDirty = true; // costume and sound drop-downs belong to the selected sprite
   renderWorkspace();
   renderSprites();
   refreshSpriteInfo(true);
-  renderActiveMediaPanel();
+  if (!same) renderActiveMediaPanel(); // keep the open editor (and its undo history)
   save();
 }
 
@@ -1886,7 +1986,7 @@ function renderSprites() {
     const tile = el('div', 'sprite-tile' + (s.id === project.selected ? ' selected' : ''));
     tile._sprite = s;
     tile.title = s.name;
-    tile.append(costumeThumb(currentCostume(s), 'emoji'), el('span', 'name', s.name));
+    tile.append(costumeThumb(displayCostume(s), 'emoji'), el('span', 'name', s.name));
     tile.addEventListener('click', () => selectSprite(s));
     if (s.id === project.selected && project.sprites.length > 1) {
       const del = el('button', 'del', '×');
@@ -2037,8 +2137,12 @@ fileInput.addEventListener('change', async () => {
   }
 });
 
-window.addEventListener('beforeunload', () => {
-  try { localStorage.setItem(STORAGE_KEY, serialize()); } catch { /* too big or unavailable: already warned */ }
+window.addEventListener('beforeunload', e => {
+  try {
+    localStorage.setItem(STORAGE_KEY, serialize());
+  } catch (err) {
+    if (saveFailed || isQuotaError(err)) { e.preventDefault(); e.returnValue = ''; } // ask before losing work
+  }
 });
 
 // ---------------------------------------------------------------------------

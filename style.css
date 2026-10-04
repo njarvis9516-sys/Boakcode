@@ -1022,6 +1022,7 @@ textarea.code {
 .paint-size span { min-width: 2ch; font-variant-numeric: tabular-nums; }
 .paint-stage {
   position: relative;
+  flex-shrink: 0; /* keep it 4:3 — the editor scrolls instead of squashing the canvas */
   width: min(100%, 720px);
   aspect-ratio: 4 / 3;
   border: 1px solid var(--border);
@@ -1049,16 +1050,17 @@ textarea.code {
 .sm-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
 .sm-controls label { display: flex; align-items: center; gap: 6px; }
 .sm-tempo input { width: 120px; }
+.sm-scroll { width: min(100%, 900px); overflow-x: auto; flex-shrink: 0; }
 .sm-grid {
   display: grid;
   gap: 2px;
-  width: min(100%, 900px);
+  width: 100%;
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #f4f6fb;
   user-select: none;
-  touch-action: none;
+  touch-action: pan-x; /* swipe sideways to scroll; tap or drag up/down to paint notes */
 }
 .sm-label { display: flex; align-items: center; font-size: 11px; color: #8a91a5; }
 .sm-label.sm-c { color: var(--text); font-weight: 700; }
@@ -1084,4 +1086,41 @@ textarea.code {
   .media-list { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
   .media-item { flex: 0 0 120px; }
   .media-add { flex-direction: row; flex-wrap: wrap; }
+}
+
+#save-warning {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1900; /* under dialogs, so it never covers their buttons */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  max-width: 640px;
+  margin-inline: auto;
+  padding: 10px 14px;
+  border: 1px solid #f0b35a;
+  border-radius: 10px;
+  background: #fff4e0;
+  color: #6b4400;
+  font-size: 13px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);
+}
+#save-warning[hidden] { display: none; }
+#save-warning .close {
+  padding: 2px 8px;
+  background: transparent;
+  color: #6b4400;
+  font-size: 18px;
+}
+#save-warning button {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: #e07b00;
+  color: #fff;
+  font-weight: 700;
 }
